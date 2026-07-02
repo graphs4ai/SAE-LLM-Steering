@@ -1,0 +1,14 @@
+data/
+runs/
+__pycache__/
+wandb/
+._*
+.DS_Store
+config/
+config_bak/
+artifacts/
+*.sbatch
+slurm_outputs/
+.env
+poeta_similarity_plots/
+.vscode/
