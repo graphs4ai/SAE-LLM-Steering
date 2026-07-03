@@ -1,0 +1,29 @@
+[project]
+name = "sae-llm-steering"
+version = "0.1.0"
+description = "SAE-based political stance steering for Gemma and related LLMs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "hydra-core",
+    "ipykernel",
+    "jupyterlab",
+    "matplotlib",
+    "numpy",
+    "omegaconf",
+    "pandas",
+    "pyarrow",
+    "sae-lens",
+    "scikit-learn",
+    "scipy",
+    "seaborn",
+    "sentence-transformers",
+    "torch",
+    "tqdm",
+    "transformer-lens",
+    "transformers",
+    "wandb",
+]
+
+[tool.uv]
+package = false
