@@ -1,7 +1,7 @@
 import pandas as pd
 import torch
 import numpy as np
-from typing import List, Optional, Union
+from typing import List, Optional
 
 
 class ActivationDataFrame:
@@ -9,32 +9,35 @@ class ActivationDataFrame:
     Efficiently accumulates activation vectors and converts them to a pandas DataFrame.
     """
 
-    def __init__(self, layers: List[int], d_model: int):
+    def __init__(self, layers: List[int], d_features: int):
         """
         Args:
             layers: List of layer indices used for extraction (sorted).
-            d_model: Dimension of activations per layer.
+            d_features: Dimension of activations per layer (d_model or d_sae).
         """
         # Store data in lists first to avoid expensive DataFrame resizing operations
         self._activations_list: List[np.ndarray] = []
         self._labels_list: List[str] = []
         self._df: Optional[pd.DataFrame] = None
         self._layers = sorted(layers)
-        self._d_model = d_model
+        self._d_features = d_features
 
     def add_batch(self, activations: torch.Tensor, labels: List[str]):
         """
         Adds a batch of activations and labels.
 
         Args:
-            activations (torch.Tensor): Shape [batch_size, d_model].
-                IMPORTANT: The wrapper returns [batch, seq_len, d_model].
+            activations (torch.Tensor): Shape [batch_size, n_layers * d_features].
+                IMPORTANT: The wrapper returns [batch, seq_len, n_layers * d_features].
                 You must select a specific token (e.g., the last token) before passing it here.
             labels (List[str]): List of class labels for the batch.
         """
         if activations.ndim != 2:
-            raise ValueError(f"Expected activations shape [batch, d_model], got {activations.shape}. "
-                             "Did you forget to select a specific token (e.g., [:, -1, :])?")
+            raise ValueError(
+                f"Expected activations shape [batch, n_layers * d_features], "
+                f"got {activations.shape}. "
+                "Did you forget to select a specific token (e.g., [:, -1, :])?"
+            )
 
         if activations.shape[0] != len(labels):
             raise ValueError(
@@ -61,11 +64,11 @@ class ActivationDataFrame:
         # 1. Concatenate all numpy arrays (Much faster than creating DF row by row)
         X = np.concatenate(self._activations_list, axis=0)
 
-        # 2. Create column names (layer_m-neuron_n)
+        # 2. Create column names (layer_m-feature_n)
         feature_cols = []
         for layer in self._layers:
-            for neuron in range(self._d_model):
-                feature_cols.append(f"layer_{layer}-neuron_{neuron}")
+            for feature in range(self._d_features):
+                feature_cols.append(f"layer_{layer}-feature_{feature}")
 
         # 3. Create DataFrame
         self._df = pd.DataFrame(X, columns=feature_cols)

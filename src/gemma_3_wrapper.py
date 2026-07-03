@@ -1,132 +1,222 @@
 import torch
 import torch.nn.functional as F
-from transformer_lens import HookedTransformer
-from typing import List, Union, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Tuple, Union
+
+from sae_lens import SAE
+from sae_lens.analysis.sae_transformer_bridge import SAETransformerBridge
 
 from utils.intervention_hooks import (
     DEFAULT_LAST_K,
     DEFAULT_SCOPE,
-    assert_scope,
-    make_intervention_hook,
+)
+
+
+# Gemma Scope 2 resid_post SAEs are only published for these layers.
+ALLOWED_SAE_LAYERS: tuple[int, ...] = (9, 17, 22, 29)
+DEFAULT_SAE_WIDTH = "65k"
+DEFAULT_SAE_L0 = "medium"
+DEFAULT_SAE_RELEASE = "gemma-scope-2-4b-it-res"
+
+# SAE metadata uses classic TL aliases; on SAETransformerBridge those live at
+# the BlockBridge hook names (see notebooks/gemma_scope2_playground.ipynb).
+_TL_TO_BRIDGE = {
+    "hook_resid_pre": "hook_in",
+    "hook_resid_mid": "ln2.hook_in",
+    "hook_resid_post": "hook_out",
+}
+
+_INTERVENTION_NOT_IMPLEMENTED = (
+    "SAE delta steering is not implemented yet. "
+    "Baseline generation (no activation_multipliers) still works; "
+    "feature interventions will land in optimize_sae_steering.py."
 )
 
 
 class Gemma3Wrapper:
     """
-    Wrapper for Gemma-3 models using TransformerLens.
-    Supports activation extraction, neuron-level interventions,
-    generation with steering, and soft stance scoring.
+    Wrapper for Gemma-3 models using SAETransformerBridge + Gemma Scope 2 SAEs.
+
+    Extracts SAE latent features at resid_post for layers in
+    ``ALLOWED_SAE_LAYERS``. Neuron-level interventions are stubbed until SAE
+    delta steering is implemented.
     """
 
     def __init__(
         self,
-        model_name: str = "google/gemma-3-9b-it",
+        model_name: str = "google/gemma-3-4b-it",
         device: str = "cuda",
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype = torch.bfloat16,
         n_devices: int = 1,
+        sae_layers: Optional[Union[List[int], str]] = None,
+        sae_width: str = DEFAULT_SAE_WIDTH,
+        sae_l0: str = DEFAULT_SAE_L0,
+        sae_release: str = DEFAULT_SAE_RELEASE,
     ):
         """
         Args:
-            model_name: Gemma-3 checkpoint supported by TransformerLens
-                        (e.g. "google/gemma-3-9b-it")
+            model_name: Gemma-3 checkpoint (e.g. "google/gemma-3-4b-it")
             device: "cuda" or "cpu"
-            dtype: torch.float16 or torch.bfloat16 (torch.float16 works kinda cringe, tbh)
-            n_devices: Number of GPUs to split the model across (model parallelism).
-                       When > 1, transformer blocks are distributed across GPUs.
+            dtype: torch.bfloat16 recommended for Gemma Scope 2
+            n_devices: Ignored; SAETransformerBridge path is single-device.
+            sae_layers: Layers to load SAEs for (subset of ALLOWED_SAE_LAYERS,
+                        or "all"). If None, SAEs are loaded lazily on first
+                        ``get_layer_activations`` call.
+            sae_width: SAE width id (e.g. "65k")
+            sae_l0: SAE L0 id (e.g. "medium")
+            sae_release: HuggingFace SAE release name
         """
-        self.device = device
-        self.n_devices = n_devices
+        if n_devices > 1:
+            print(
+                "Warning: Gemma3Wrapper ignores n_devices>1; "
+                "SAETransformerBridge uses a single device."
+            )
 
-        self.model = HookedTransformer.from_pretrained(
+        self.device = device
+        self.n_devices = 1
+        self.dtype = dtype
+        self.sae_width = sae_width
+        self.sae_l0 = sae_l0
+        self.sae_release = sae_release
+
+        self.model = SAETransformerBridge.boot_transformers(
             model_name,
             device=device,
-            fold_ln=False,
-            center_writing_weights=False,
-            center_unembed=False,
             dtype=dtype,
-            n_devices=n_devices,
         )
 
-        # When using multi-GPU, input must go to the first device explicitly
-        self.input_device = "cuda:0" if n_devices > 1 else device
+        # Single-device path: inputs go to the model device.
+        if getattr(self.model.cfg, "device", None) is not None:
+            self.input_device = str(self.model.cfg.device)
+        else:
+            self.input_device = device
 
-        # Ensure pad token exists
         if self.model.tokenizer.pad_token_id is None:
             self.model.tokenizer.pad_token_id = self.model.tokenizer.eos_token_id
 
         self.n_layers = self.model.cfg.n_layers
 
-    def get_layer_activations(
-        self,
-        tokens: torch.Tensor,
-        layers: Union[List[int], str] = [0],
-        activation_multipliers: Optional[Dict[str, float]] = None,
-    ) -> torch.Tensor:
-        """
-        Returns resid_pre activations for selected layers, concatenated
-        along the feature dimension.
-        """
+        self.saes: Dict[int, SAE] = {}
+        self.sae_hook_names: Dict[int, str] = {}
+        self._d_sae: Optional[int] = None
 
+        if sae_layers is not None:
+            self.load_saes(sae_layers, width=sae_width, l0=sae_l0)
+
+    @property
+    def d_sae(self) -> int:
+        if self._d_sae is None:
+            raise RuntimeError(
+                "No SAEs loaded yet. Call load_saes(...) or get_layer_activations(...)."
+            )
+        return self._d_sae
+
+    def resolve_sae_layers(
+        self, layers: Union[List[int], str]
+    ) -> List[int]:
+        """Expand and validate SAE layer indices against ALLOWED_SAE_LAYERS."""
         if isinstance(layers, str):
             if layers.lower() == "all":
-                layers = list(range(self.n_layers))
-            else:
-                raise ValueError("layers must be a list or 'all'")
+                return list(ALLOWED_SAE_LAYERS)
+            raise ValueError("layers must be a list or 'all'")
 
         if not layers:
             raise ValueError("layers list cannot be empty")
 
-        if activation_multipliers is None:
-            activation_multipliers = {}
-
-        # Parse neuron multipliers
-        layer_neuron_multipliers: Dict[int, Dict[int, float]] = {}
-        for name, mult in activation_multipliers.items():
-            parts = name.split("-")
-            layer = int(parts[0].split("_")[1])
-            neuron = int(parts[1].split("_")[1])
-            layer_neuron_multipliers.setdefault(layer, {})[neuron] = mult
-
-        activations: Dict[int, torch.Tensor] = {}
-
-        def make_layer_hook(layer_idx: int, neuron_mults: Optional[Dict[int, float]]):
-            def hook(resid_pre: torch.Tensor, hook):
-                if neuron_mults:
-                    modified = resid_pre.clone()
-                    for n, m in neuron_mults.items():
-                        modified[:, :, n] *= m
-                    activations[layer_idx] = modified.detach().cpu()
-                    return modified
-                else:
-                    activations[layer_idx] = resid_pre.detach().cpu()
-                    return resid_pre
-            return hook
-
-        intervention_layers = set(layer_neuron_multipliers.keys())
-        all_hook_layers = set(layers) | intervention_layers
-
-        fwd_hooks = []
-        for layer in all_hook_layers:
-            hook_point = f"blocks.{layer}.hook_resid_pre"
-            fwd_hooks.append(
-                (hook_point, make_layer_hook(
-                    layer, layer_neuron_multipliers.get(layer)))
+        resolved = [int(layer) for layer in layers]
+        invalid = [layer for layer in resolved if layer not in ALLOWED_SAE_LAYERS]
+        if invalid:
+            raise ValueError(
+                f"Unsupported SAE layers: {invalid}. "
+                f"Allowed: {list(ALLOWED_SAE_LAYERS)}"
             )
+        return resolved
 
-        stop_at_layer = max(all_hook_layers) + 1
+    def _resolve_bridge_hook_name(self, alias: str) -> str:
+        resolved = self.model._resolve_hook_name(alias)
+        prefix, _, leaf = resolved.rpartition(".")
+        if leaf in _TL_TO_BRIDGE:
+            return f"{prefix}.{_TL_TO_BRIDGE[leaf]}"
+        return resolved
+
+    def load_saes(
+        self,
+        layers: Union[List[int], str],
+        width: Optional[str] = None,
+        l0: Optional[str] = None,
+        release: Optional[str] = None,
+    ) -> None:
+        """Load Gemma Scope 2 resid_post SAEs for the requested layers."""
+        width = width or self.sae_width
+        l0 = l0 or self.sae_l0
+        release = release or self.sae_release
+        self.sae_width = width
+        self.sae_l0 = l0
+        self.sae_release = release
+
+        resolved_layers = self.resolve_sae_layers(layers)
+        sae_device = self.input_device
+
+        for layer in resolved_layers:
+            if layer in self.saes:
+                continue
+
+            sae_id = f"layer_{layer}_width_{width}_l0_{l0}"
+            sae, _cfg_dict, _sparsity = SAE.from_pretrained_with_cfg_and_sparsity(
+                release=release,
+                sae_id=sae_id,
+                device=sae_device,
+                dtype=self.dtype,
+            )
+            hook_alias = sae.cfg.metadata.hook_name
+            hook_name = self._resolve_bridge_hook_name(hook_alias)
+
+            self.saes[layer] = sae
+            self.sae_hook_names[layer] = hook_name
+
+            if self._d_sae is None:
+                self._d_sae = int(sae.cfg.d_sae)
+            elif int(sae.cfg.d_sae) != self._d_sae:
+                raise RuntimeError(
+                    f"SAE d_sae mismatch at layer {layer}: "
+                    f"got {sae.cfg.d_sae}, expected {self._d_sae}"
+                )
+
+    def get_layer_activations(
+        self,
+        tokens: torch.Tensor,
+        layers: Union[List[int], str] = "all",
+    ) -> torch.Tensor:
+        """
+        Returns SAE latent activations for selected layers, concatenated
+        along the feature dimension.
+
+        Shape: [batch, seq_len, n_layers * d_sae], layers in sorted order.
+        """
+        resolved_layers = self.resolve_sae_layers(layers)
+        missing = [layer for layer in resolved_layers if layer not in self.saes]
+        if missing:
+            self.load_saes(missing)
+
+        sae_list = [self.saes[layer] for layer in sorted(resolved_layers)]
 
         with torch.no_grad():
-            self.model.run_with_hooks(
+            _logits, cache = self.model.run_with_cache_with_saes(
                 tokens.to(self.input_device),
-                fwd_hooks=fwd_hooks,
-                stop_at_layer=stop_at_layer,
+                saes=sae_list,
             )
 
-        for layer in layers:
-            if layer not in activations:
-                raise RuntimeError(f"Missing activation for layer {layer}")
+        activations: List[torch.Tensor] = []
+        for layer in sorted(resolved_layers):
+            hook_name = self.sae_hook_names[layer]
+            cache_key = f"{hook_name}.hook_sae_acts_post"
+            if cache_key not in cache:
+                raise RuntimeError(
+                    f"Missing SAE feature activations for layer {layer} "
+                    f"(cache key {cache_key!r})"
+                )
+            activations.append(cache[cache_key].detach().cpu())
 
-        return torch.cat([activations[l] for l in sorted(layers)], dim=-1)
+        return torch.cat(activations, dim=-1)
 
     def generate_with_intervention(
         self,
@@ -143,64 +233,22 @@ class Gemma3Wrapper:
         debug_seq_lens: Optional[List[int]] = None,
         **generate_kwargs,
     ) -> torch.Tensor:
+        if activation_multipliers:
+            raise NotImplementedError(_INTERVENTION_NOT_IMPLEMENTED)
 
         if eos_token_id is None:
             eos_token_id = self.model.tokenizer.eos_token_id
 
-        if not activation_multipliers:
-            return self.model.generate(
-                input_ids.to(self.input_device),
-                max_new_tokens=max_new_tokens,
-                temperature=temperature if temperature is not None else 1.0,
-                do_sample=do_sample,
-                stop_at_eos=stop_at_eos,
-                eos_token_id=eos_token_id,
-                verbose=verbose,
-                **generate_kwargs,
-            )
-
-        assert_scope(intervention_scope)
-
-        layer_neuron_multipliers: Dict[int, Dict[int, float]] = {}
-        for name, mult in activation_multipliers.items():
-            parts = name.split("-")
-            layer = int(parts[0].split("_")[1])
-            neuron = int(parts[1].split("_")[1])
-            layer_neuron_multipliers.setdefault(layer, {})[neuron] = mult
-
-        input_len = int(input_ids.shape[-1])
-        hooks = [
-            (
-                f"blocks.{layer}.hook_resid_pre",
-                make_intervention_hook(
-                    neuron_mults=mults,
-                    input_len=input_len,
-                    scope=intervention_scope,
-                    last_k=last_k,
-                    debug_seq_lens=debug_seq_lens,
-                ),
-            )
-            for layer, mults in layer_neuron_multipliers.items()
-        ]
-
-        with torch.no_grad():
-            for hp, fn in hooks:
-                self.model.add_hook(hp, fn)
-            try:
-                out = self.model.generate(
-                    input_ids.to(self.input_device),
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature if temperature is not None else 1.0,
-                    do_sample=do_sample,
-                    stop_at_eos=stop_at_eos,
-                    eos_token_id=eos_token_id,
-                    verbose=verbose,
-                    **generate_kwargs,
-                )
-            finally:
-                self.model.reset_hooks()
-
-        return out
+        return self.model.generate(
+            input_ids.to(self.input_device),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature if temperature is not None else 1.0,
+            do_sample=do_sample,
+            stop_at_eos=stop_at_eos,
+            eos_token_id=eos_token_id,
+            verbose=verbose,
+            **generate_kwargs,
+        )
 
     def get_stance_token_ids(self, language: str = "pt") -> Tuple[int, int]:
         """
@@ -228,6 +276,8 @@ class Gemma3Wrapper:
         intervention_scope: str = DEFAULT_SCOPE,
         last_k: int = DEFAULT_LAST_K,
     ) -> Tuple[float, float]:
+        if activation_multipliers:
+            raise NotImplementedError(_INTERVENTION_NOT_IMPLEMENTED)
 
         if positive_token_id is None or negative_token_id is None:
             pos, neg = self.get_stance_token_ids(language)
@@ -239,34 +289,8 @@ class Gemma3Wrapper:
 
         input_ids = input_ids.to(self.input_device)
 
-        if not activation_multipliers:
-            with torch.no_grad():
-                logits = self.model(input_ids)
-        else:
-            assert_scope(intervention_scope)
-            layer_neuron_multipliers: Dict[int, Dict[int, float]] = {}
-            for name, mult in activation_multipliers.items():
-                parts = name.split("-")
-                layer = int(parts[0].split("_")[1])
-                neuron = int(parts[1].split("_")[1])
-                layer_neuron_multipliers.setdefault(layer, {})[neuron] = mult
-
-            input_len = int(input_ids.shape[1])
-            hooks = [
-                (
-                    f"blocks.{layer}.hook_resid_pre",
-                    make_intervention_hook(
-                        neuron_mults=mults,
-                        input_len=input_len,
-                        scope=intervention_scope,
-                        last_k=last_k,
-                    ),
-                )
-                for layer, mults in layer_neuron_multipliers.items()
-            ]
-
-            with torch.no_grad():
-                logits = self.model.run_with_hooks(input_ids, fwd_hooks=hooks)
+        with torch.no_grad():
+            logits = self.model(input_ids)
 
         last_logits = logits[0, -1]
         probs = F.softmax(last_logits, dim=-1)

@@ -86,20 +86,36 @@ def get_model_wrapper(cfg: DictConfig, device: str = "auto"):
 
     elif wrapper_type == "gemma":
         from gemma_3_wrapper import Gemma3Wrapper
+
+        extraction_cfg = cfg.get("extraction", {}) or {}
+        sae_layers = extraction_cfg.get("layers", "all")
+        sae_width = extraction_cfg.get("sae_width", "65k")
+        sae_l0 = extraction_cfg.get("sae_l0", "medium")
+        sae_release = extraction_cfg.get(
+            "sae_release", "gemma-scope-2-4b-it-res")
+        # OmegaConf ListConfig -> plain list for the wrapper.
+        if sae_layers is not None and not isinstance(sae_layers, str):
+            sae_layers = list(sae_layers)
+
+        gemma_kwargs = dict(
+            device=device,
+            dtype=dtype,
+            n_devices=n_devices,
+            sae_layers=sae_layers,
+            sae_width=sae_width,
+            sae_l0=sae_l0,
+            sae_release=sae_release,
+        )
         if model_name:
-            model_wrapper = Gemma3Wrapper(
-                model_name=model_name, device=device, dtype=dtype, n_devices=n_devices)
-            if model_wrapper.model.tokenizer is None:
-                raise ValueError(
-                    f"Failed to initialize tokenizer for model: {model_name}")
-            return model_wrapper
-        else:
-            model_wrapper = Gemma3Wrapper(
-                device=device, dtype=dtype, n_devices=n_devices)
-            if model_wrapper.model.tokenizer is None:
-                raise ValueError(
-                    "Failed to initialize tokenizer for default Gemma model")
-            return model_wrapper
+            gemma_kwargs["model_name"] = model_name
+
+        model_wrapper = Gemma3Wrapper(**gemma_kwargs)
+        if model_wrapper.model.tokenizer is None:
+            raise ValueError(
+                f"Failed to initialize tokenizer for model: "
+                f"{model_name or 'default Gemma'}"
+            )
+        return model_wrapper
 
     elif wrapper_type == "qwen":
         from qwen_3_wrapper import Qwen3Wrapper

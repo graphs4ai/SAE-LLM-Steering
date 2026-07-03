@@ -98,7 +98,7 @@ def main(cfg: DictConfig):
         )
 
     # Update W&B config
-    wandb.config.update({
+    wandb_run_config = {
         'feature_selection_dataset': input_path,
         'dataset_artifact': dataset_artifact_name,
         'output_file': output_path,
@@ -110,7 +110,16 @@ def main(cfg: DictConfig):
         'model_wrapper': cfg.model.wrapper,
         'extraction_seed': resolved.extraction,
         'resolved_seeds': resolved_seeds_to_dict(resolved),
-    })
+    }
+    if cfg.model.wrapper == "gemma":
+        wandb_run_config.update({
+            'sae_width': cfg.extraction.get('sae_width', '65k'),
+            'sae_l0': cfg.extraction.get('sae_l0', 'medium'),
+            'sae_release': cfg.extraction.get(
+                'sae_release', 'gemma-scope-2-4b-it-res'),
+            'hook': 'resid_post',
+        })
+    wandb.config.update(wandb_run_config)
 
     # 1. Load Data
     print(f"Loading data from {input_path}...")
@@ -135,22 +144,28 @@ def main(cfg: DictConfig):
     wrapper = get_model_wrapper(cfg)
     if wrapper.model.tokenizer is None:
         raise ValueError("The model wrapper must have a tokenizer.")
-    print(f"Loaded model: {wrapper.model.cfg.model_name}")
+    loaded_name = getattr(wrapper.model.cfg, "model_name", None) or cfg.model.name
+    print(f"Loaded model: {loaded_name}")
 
     # Ensure tokenizer has a pad token
     if wrapper.model.tokenizer.pad_token is None:
         wrapper.model.tokenizer.pad_token = wrapper.model.tokenizer.eos_token
 
-    # Resolve layers list (handle 'all' option)
+    # Resolve layers list (handle 'all' option). Gemma uses SAE-allowed layers.
     layers_cfg = cfg.extraction.layers
-    if isinstance(layers_cfg, str):
+    is_gemma_sae = hasattr(wrapper, "resolve_sae_layers")
+    if is_gemma_sae:
+        layers = wrapper.resolve_sae_layers(layers_cfg)
+        d_features = wrapper.d_sae
+    elif isinstance(layers_cfg, str):
         layers = list(range(wrapper.n_layers))
+        d_features = wrapper.model.cfg.d_model
     else:
         layers = list(layers_cfg)
+        d_features = wrapper.model.cfg.d_model
 
     # 3. Initialize Accumulator with layer info
-    d_model = wrapper.model.cfg.d_model
-    activation_df = ActivationDataFrame(layers=layers, d_model=d_model)
+    activation_df = ActivationDataFrame(layers=layers, d_features=d_features)
 
     # 4. Processing Loop
     print("Starting extraction loop...")
@@ -181,7 +196,7 @@ def main(cfg: DictConfig):
             # Wrapper handles device placement internally;
             # activations are returned on CPU (hooks use .detach().cpu())
             layer_activations = wrapper.get_layer_activations(
-                input_ids, layers=cfg.extraction.layers)
+                input_ids, layers=layers)
         except Exception as e:
             print(f"Error processing batch {start_idx}-{end_idx}: {e}")
             continue
@@ -210,33 +225,50 @@ def main(cfg: DictConfig):
 
     # --- ARTIFACT: Log activations as versioned dataset artifact ---
 
+    artifact_metadata = {
+        'model_name': cfg.model.name,
+        'model_wrapper': cfg.model.wrapper,
+        'feature_selection_dataset': input_path,
+        'n_samples': total_samples,
+        'n_layers': len(layers),
+        'layers': layers,
+        'd_features': d_features,
+        'batch_size': batch_size,
+        'max_length': cfg.extraction.max_length,
+    }
+    if is_gemma_sae:
+        artifact_metadata.update({
+            'd_sae': d_features,
+            'sae_width': getattr(wrapper, 'sae_width', None),
+            'sae_l0': getattr(wrapper, 'sae_l0', None),
+            'sae_release': getattr(wrapper, 'sae_release', None),
+            'hook': 'resid_post',
+        })
+    else:
+        artifact_metadata['d_model'] = d_features
+
     activations_artifact = wandb.Artifact(
         name=artifact_name,
         type="dataset",
         description=f"Extracted activations from {cfg.model.name} on {dataset_name} dataset",
-        metadata={
-            'model_name': cfg.model.name,
-            'model_wrapper': cfg.model.wrapper,
-            'feature_selection_dataset': input_path,
-            'n_samples': total_samples,
-            'n_layers': len(layers),
-            'layers': layers,
-            'd_model': d_model,
-            'batch_size': batch_size,
-            'max_length': cfg.extraction.max_length,
-        }
+        metadata=artifact_metadata,
     )
     activations_artifact.add_file(full_output_path)
     wandb.log_artifact(activations_artifact)
     print(f"Activations artifact logged: {artifact_name}")
 
     # Log summary metrics
-    wandb.summary.update({
+    summary = {
         'n_samples': total_samples,
         'n_layers': len(layers),
-        'd_model': d_model,
-        'n_features': len(layers) * d_model,
-    })
+        'd_features': d_features,
+        'n_features': len(layers) * d_features,
+    }
+    if is_gemma_sae:
+        summary['d_sae'] = d_features
+    else:
+        summary['d_model'] = d_features
+    wandb.summary.update(summary)
 
     # Finish W&B run
     wandb.finish()
