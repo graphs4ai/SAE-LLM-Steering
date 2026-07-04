@@ -5,12 +5,14 @@ description = "SAE-based political stance steering for Gemma and related LLMs"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cmaes",
     "hydra-core",
     "ipykernel",
     "jupyterlab",
     "matplotlib",
     "numpy",
     "omegaconf",
+    "optuna",
     "pandas",
     "pyarrow",
     "sae-lens",
