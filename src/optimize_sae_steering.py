@@ -17,9 +17,8 @@ from model_factory import get_model_wrapper
 from ipi_eval import (
     run_ipi_test_streaming,
     compute_kl_divergence,
-    create_ipi_prompt,
-    format_chat_prompt,
 )
+from utils.ipi_prompts import create_ipi_prompt, format_chat_prompt
 from utils.ipi_surrogate import (
     discover_option_token_ids,
     flush_option_scores_wandb_log,
@@ -36,6 +35,7 @@ from utils.intervention_hooks import (
 
 
 INTERVENTION_MODE = "sae_decoded_delta_additive"
+DEFAULT_DECODER_NORMALIZATION = "unit_norm"
 
 
 def _ranked_feature_to_feature_name(entry: dict[str, Any]) -> str:
@@ -51,6 +51,15 @@ def _ranked_feature_to_feature_name(entry: dict[str, Any]) -> str:
             "Each ranked feature must provide either feature_name or both layer and feature."
         )
     return f"layer_{int(layer)}-feature_{int(feature)}"
+
+
+def _wrapper_intervention_kwargs(
+    wrapper: Any,
+    decoder_normalization: str,
+) -> dict[str, Any]:
+    if getattr(wrapper.__class__, "__name__", "") == "Gemma3Wrapper":
+        return {"decoder_normalization": decoder_normalization}
+    return {}
 
 
 class TeeOutput:
@@ -175,6 +184,7 @@ def soft_objective(
     direction: str = "maximize",
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
+    decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
 ) -> float:
     """
     Soft IPI objective using expected IPI over A–E option letters.
@@ -235,6 +245,9 @@ def soft_objective(
                 activation_multipliers=multipliers,
                 intervention_scope=intervention_scope,
                 last_k=last_k,
+                **_wrapper_intervention_kwargs(
+                    wrapper, decoder_normalization=decoder_normalization
+                ),
             )
 
             # Store based on question type
@@ -275,7 +288,10 @@ def objective(
     bounds: Tuple[float, float],
     language: str = "pt",
     max_new_tokens: int = 10,
-    temperature: float = 0.0
+    temperature: float = 0.0,
+    intervention_scope: str = DEFAULT_SCOPE,
+    last_k: int = DEFAULT_LAST_K,
+    decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
 ) -> Tuple[float, float]:
     """
     Multi-objective function for Optuna optimization.
@@ -316,7 +332,10 @@ def objective(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         activation_multipliers=multipliers,
-        verbose=False
+        verbose=False,
+        intervention_scope=intervention_scope,
+        last_k=last_k,
+        decoder_normalization=decoder_normalization,
     )
 
     for pair_result in pair_generator:
@@ -431,6 +450,9 @@ def save_optimization_results(
     baseline_soft_score: Optional[float] = None,
     use_soft_metric: bool = False,
     soft_metrics: Optional[Dict[str, float]] = None,
+    coefficient_type: str = "beta",
+    decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
+    edit_mode: str = "additive_latent_delta",
 ) -> str:
     """
     Saves optimization results to JSON file.
@@ -462,7 +484,10 @@ def save_optimization_results(
             'best_trial': {
                 'trial_number': best_trial.number,
                 'soft_score': best_trial.value,
-                'multipliers': best_trial.params
+                'multipliers': best_trial.params,
+                'coefficient_type': coefficient_type,
+                'decoder_normalization': decoder_normalization,
+                'edit_mode': edit_mode,
             },
             'all_trials': [
                 {
@@ -484,6 +509,9 @@ def save_optimization_results(
             'optimization_mode': 'multi_objective',
             'config': config,
             'soft_metrics': soft_metrics or {},
+            'coefficient_type': coefficient_type,
+            'decoder_normalization': decoder_normalization,
+            'edit_mode': edit_mode,
             'pareto_front': [
                 {
                     'trial_number': t.number,
@@ -599,6 +627,7 @@ def compute_soft_scores(
     label: str = "score",
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
+    decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
 ) -> Tuple[float, float]:
     """
     Computes signed and absolute soft score for a questions dataset.
@@ -650,6 +679,9 @@ def compute_soft_scores(
                 activation_multipliers=activation_multipliers,
                 intervention_scope=intervention_scope,
                 last_k=last_k,
+                **_wrapper_intervention_kwargs(
+                    wrapper, decoder_normalization=decoder_normalization
+                ),
             )
 
             if tipo == 'P+':
@@ -713,6 +745,9 @@ def main(cfg: DictConfig):
         direction = opt_cfg.get('direction', 'maximize')
         intervention_scope = str(opt_cfg.get('intervention_scope', DEFAULT_SCOPE))
         intervention_last_k = int(opt_cfg.get('intervention_last_k', DEFAULT_LAST_K))
+        decoder_normalization = str(
+            opt_cfg.get('decoder_normalization', DEFAULT_DECODER_NORMALIZATION)
+        )
 
         if top_k is None or int(top_k) <= 0:
             raise ValueError(
@@ -781,6 +816,12 @@ def main(cfg: DictConfig):
             ranked_features = feature_ranking_payload.get("ranked_features", [])
             if not isinstance(ranked_features, list):
                 raise ValueError("Invalid feature_ranking.json: ranked_features must be a list.")
+            decoder_normalization = str(
+                feature_ranking_payload.get(
+                    "decoder_normalization",
+                    decoder_normalization,
+                )
+            )
 
             print(
                 f"Loaded feature ranking with {len(ranked_features)} features")
@@ -852,6 +893,7 @@ def main(cfg: DictConfig):
         for n in target_features:
             print(f"  - {n}")
         print(f"\nAdditive coefficient bounds: [{bounds[0]}, {bounds[1]}]")
+        print(f"Decoder normalization: {decoder_normalization}")
         print(f"Number of trials: {n_trials}")
         print(f"Intervention scope: {intervention_scope} (last_k={intervention_last_k})")
         print(f"Fast mode: {fast_mode}" +
@@ -951,6 +993,7 @@ def main(cfg: DictConfig):
             label="Optimization baseline",
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            decoder_normalization=decoder_normalization,
         )
         baseline_val_signed_soft, baseline_val_abs_soft = compute_soft_scores(
             wrapper=wrapper,
@@ -962,6 +1005,7 @@ def main(cfg: DictConfig):
             label="Validation baseline",
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            decoder_normalization=decoder_normalization,
         )
 
         # Create sampler based on config
@@ -1018,6 +1062,7 @@ def main(cfg: DictConfig):
                 use_absolute=use_absolute,
                 intervention_scope=intervention_scope,
                 last_k=intervention_last_k,
+                decoder_normalization=decoder_normalization,
             ),
             n_trials=n_trials,
             show_progress_bar=True
@@ -1039,6 +1084,7 @@ def main(cfg: DictConfig):
             label="Optimization intervened",
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            decoder_normalization=decoder_normalization,
         )
         val_intervened_signed, val_intervened_abs = compute_soft_scores(
             wrapper=wrapper,
@@ -1050,6 +1096,7 @@ def main(cfg: DictConfig):
             label="Validation intervened",
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            decoder_normalization=decoder_normalization,
         )
 
         if use_absolute:
@@ -1101,6 +1148,9 @@ def main(cfg: DictConfig):
             baseline_soft_score=baseline_ref,
             use_soft_metric=True,
             soft_metrics=soft_metrics,
+            coefficient_type="beta",
+            decoder_normalization=decoder_normalization,
+            edit_mode="additive_latent_delta",
         )
 
         print(f"\nResults saved to: {results_path}")
@@ -1175,6 +1225,9 @@ def main(cfg: DictConfig):
                 'intervention_scope': intervention_scope,
                 'intervention_last_k': intervention_last_k,
                 'intervention_mode': INTERVENTION_MODE,
+                'coefficient_type': 'beta',
+                'decoder_normalization': decoder_normalization,
+                'edit_mode': 'additive_latent_delta',
                 'surrogate': 'expected_ipi_ae',
                 'seed_dependent_option_scores': shuffle_option_scores,
                 'option_mapping_seed': option_mapping_seed,
@@ -1206,6 +1259,9 @@ def main(cfg: DictConfig):
             'intervention_scope': intervention_scope,
             'intervention_last_k': intervention_last_k,
             'intervention_mode': INTERVENTION_MODE,
+            'coefficient_type': 'beta',
+            'decoder_normalization': decoder_normalization,
+            'edit_mode': 'additive_latent_delta',
             **soft_metrics,
         })
 

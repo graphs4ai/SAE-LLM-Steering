@@ -1,7 +1,7 @@
 import pandas as pd
 import torch
 import numpy as np
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class ActivationDataFrame:
@@ -18,11 +18,17 @@ class ActivationDataFrame:
         # Store data in lists first to avoid expensive DataFrame resizing operations
         self._activations_list: List[np.ndarray] = []
         self._labels_list: List[str] = []
+        self._metadata_lists: Dict[str, List[object]] = {}
         self._df: Optional[pd.DataFrame] = None
         self._layers = sorted(layers)
         self._d_features = d_features
 
-    def add_batch(self, activations: torch.Tensor, labels: List[str]):
+    def add_batch(
+        self,
+        activations: torch.Tensor,
+        labels: List[str],
+        metadata: Optional[Dict[str, List[object]]] = None,
+    ):
         """
         Adds a batch of activations and labels.
 
@@ -31,6 +37,8 @@ class ActivationDataFrame:
                 IMPORTANT: The wrapper returns [batch, seq_len, n_layers * d_features].
                 You must select a specific token (e.g., the last token) before passing it here.
             labels (List[str]): List of class labels for the batch.
+            metadata: Optional dict of per-row metadata lists with the same
+                length as the batch, e.g. {"pair_key": [...], "row_id": [...]}.
         """
         if activations.ndim != 2:
             raise ValueError(
@@ -49,6 +57,14 @@ class ActivationDataFrame:
 
         self._activations_list.append(acts_np)
         self._labels_list.extend(labels)
+        if metadata:
+            for key, values in metadata.items():
+                if len(values) != activations.shape[0]:
+                    raise ValueError(
+                        f"Metadata column {key!r} has {len(values)} rows, "
+                        f"expected {activations.shape[0]}."
+                    )
+                self._metadata_lists.setdefault(key, []).extend(values)
         self._df = None  # Invalidate cached DataFrame
 
     def get_df(self) -> pd.DataFrame:
@@ -75,6 +91,8 @@ class ActivationDataFrame:
 
         # 4. Add class column
         self._df["class"] = self._labels_list
+        for key, values in self._metadata_lists.items():
+            self._df[key] = values
 
         return self._df
 

@@ -9,6 +9,9 @@ from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 import wandb
 
+from utils.ipi_prompts import build_ipi_chat_prompt
+from utils.ipi_surrogate import resolve_option_scores
+
 
 def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
     """
@@ -16,6 +19,15 @@ def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
     Assuming attention_mask is 1 for tokens and 0 for padding.
     """
     return attention_mask.sum(dim=1) - 1
+
+
+def _pair_key_from_row_id(row_id: str) -> str:
+    text = str(row_id)
+    if text.endswith("_left"):
+        return text[:-5]
+    if text.endswith("_right"):
+        return text[:-6]
+    return text
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
@@ -33,6 +45,7 @@ def main(cfg: DictConfig):
 
     # Configuration from Hydra
     batch_size = cfg.extraction.batch_size
+    prompt_mode = str(cfg.extraction.get("prompt_mode", "bare_statement"))
     device = cfg.extraction.device if torch.cuda.is_available(
     ) and cfg.extraction.device == "cuda" else "cpu"
 
@@ -110,6 +123,7 @@ def main(cfg: DictConfig):
         'model_wrapper': cfg.model.wrapper,
         'extraction_seed': resolved.extraction,
         'resolved_seeds': resolved_seeds_to_dict(resolved),
+        'prompt_mode': prompt_mode,
     }
     if cfg.model.wrapper == "gemma":
         wandb_run_config.update({
@@ -151,6 +165,8 @@ def main(cfg: DictConfig):
     if wrapper.model.tokenizer.pad_token is None:
         wrapper.model.tokenizer.pad_token = wrapper.model.tokenizer.eos_token
 
+    option_scores = resolve_option_scores(cfg)
+
     # Resolve layers list (handle 'all' option). Gemma uses SAE-allowed layers.
     layers_cfg = cfg.extraction.layers
     is_gemma_sae = hasattr(wrapper, "resolve_sae_layers")
@@ -177,8 +193,30 @@ def main(cfg: DictConfig):
         end_idx = min(start_idx + batch_size, total_samples)
         batch_df = df.iloc[start_idx:end_idx]
 
-        texts = batch_df['statement'].tolist()
+        statements = batch_df['statement'].astype(str).tolist()
         labels = batch_df['pol_label_human'].tolist()
+        row_ids = batch_df["id"].astype(str).tolist() if "id" in batch_df.columns else [
+            f"row_{idx}" for idx in batch_df.index
+        ]
+        pair_keys = [_pair_key_from_row_id(row_id) for row_id in row_ids]
+
+        if prompt_mode == "ipi_chat":
+            texts = [
+                build_ipi_chat_prompt(
+                    wrapper.model.tokenizer,
+                    statement=statement,
+                    language=str(cfg.ipi.get("language", "pt")),
+                    option_scores=option_scores,
+                )
+                for statement in statements
+            ]
+        elif prompt_mode == "bare_statement":
+            texts = statements
+        else:
+            raise ValueError(
+                f"Unknown extraction.prompt_mode={prompt_mode!r}. "
+                "Expected 'ipi_chat' or 'bare_statement'."
+            )
 
         # Tokenize
         encoding = wrapper.model.tokenizer(
@@ -214,7 +252,15 @@ def main(cfg: DictConfig):
                                                   last_token_indices, :]
 
         # Add to accumulator
-        activation_df.add_batch(final_activations, labels)
+        activation_df.add_batch(
+            final_activations,
+            labels,
+            metadata={
+                "pair_key": pair_keys,
+                "row_id": row_ids,
+                "statement": statements,
+            },
+        )
 
     # 5. Save Results
     print(f"Saving results to {output_path}...")
@@ -235,6 +281,8 @@ def main(cfg: DictConfig):
         'd_features': d_features,
         'batch_size': batch_size,
         'max_length': cfg.extraction.max_length,
+        'prompt_mode': prompt_mode,
+        'token_position': 'last_prompt',
     }
     if is_gemma_sae:
         artifact_metadata.update({

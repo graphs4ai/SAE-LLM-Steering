@@ -11,6 +11,7 @@ from utils.intervention_hooks import (
     assert_scope,
     make_delta_steering_hook,
 )
+from utils.sae_steering import build_normalized_steering_vector
 
 
 # Gemma Scope 2 resid_post SAEs are only published for these layers.
@@ -19,6 +20,7 @@ DEFAULT_SAE_WIDTH = "65k"
 DEFAULT_SAE_L0 = "medium"
 DEFAULT_SAE_RELEASE = "gemma-scope-2-4b-it-res"
 INTERVENTION_MODE = "sae_decoded_delta_additive"
+DEFAULT_DECODER_NORMALIZATION = "raw"
 
 # SAE metadata uses classic TL aliases; on SAETransformerBridge those live at
 # the BlockBridge hook names (see notebooks/gemma_scope2_playground.ipynb).
@@ -221,22 +223,34 @@ class Gemma3Wrapper:
         self,
         layer: int,
         feature_alphas: Dict[int, float],
+        decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
     ) -> torch.Tensor:
         """Linear-decoder Option-2 delta: sum_j alpha_j * W_dec[j]."""
         sae = self.saes[layer]
         w_dec = sae.W_dec
         d_sae = int(sae.cfg.d_sae)
-        steering = torch.zeros(
-            w_dec.shape[1],
-            device=w_dec.device,
-            dtype=w_dec.dtype,
-        )
         for feature_idx, alpha in feature_alphas.items():
             if feature_idx < 0 or feature_idx >= d_sae:
                 raise ValueError(
                     f"Feature index {feature_idx} out of range for layer {layer} "
                     f"(d_sae={d_sae})."
                 )
+        if decoder_normalization == "unit_norm":
+            return build_normalized_steering_vector(
+                w_dec=w_dec,
+                feature_coefficients=feature_alphas,
+            )
+        if decoder_normalization != "raw":
+            raise ValueError(
+                f"Unknown decoder_normalization={decoder_normalization!r}. "
+                "Expected 'raw' or 'unit_norm'."
+            )
+        steering = torch.zeros(
+            w_dec.shape[1],
+            device=w_dec.device,
+            dtype=w_dec.dtype,
+        )
+        for feature_idx, alpha in feature_alphas.items():
             if alpha == 0.0:
                 continue
             steering = steering + alpha * w_dec[feature_idx]
@@ -248,6 +262,7 @@ class Gemma3Wrapper:
         input_len: int,
         intervention_scope: str,
         last_k: int,
+        decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
         debug_seq_lens: Optional[List[int]] = None,
     ) -> List[Tuple[str, object]]:
         assert_scope(intervention_scope)
@@ -258,7 +273,11 @@ class Gemma3Wrapper:
 
         hooks: List[Tuple[str, object]] = []
         for layer, feature_alphas in layer_feature_alphas.items():
-            steering_vector = self._build_steering_vector(layer, feature_alphas)
+            steering_vector = self._build_steering_vector(
+                layer,
+                feature_alphas,
+                decoder_normalization=decoder_normalization,
+            )
             hook_name = self.sae_hook_names[layer]
             hooks.append(
                 (
@@ -323,6 +342,7 @@ class Gemma3Wrapper:
         verbose: bool = False,
         intervention_scope: str = DEFAULT_SCOPE,
         last_k: int = DEFAULT_LAST_K,
+        decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
         debug_seq_lens: Optional[List[int]] = None,
         **generate_kwargs,
     ) -> torch.Tensor:
@@ -349,6 +369,7 @@ class Gemma3Wrapper:
             input_len=input_len,
             intervention_scope=intervention_scope,
             last_k=last_k,
+            decoder_normalization=decoder_normalization,
             debug_seq_lens=debug_seq_lens,
         )
 
@@ -378,6 +399,7 @@ class Gemma3Wrapper:
         activation_multipliers: Optional[Dict[str, float]] = None,
         intervention_scope: str = DEFAULT_SCOPE,
         last_k: int = DEFAULT_LAST_K,
+        decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
     ) -> torch.Tensor:
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
@@ -393,6 +415,7 @@ class Gemma3Wrapper:
             input_len=input_len,
             intervention_scope=intervention_scope,
             last_k=last_k,
+            decoder_normalization=decoder_normalization,
         )
         with torch.no_grad():
             return self.model.run_with_hooks(input_ids, fwd_hooks=hooks)
@@ -406,6 +429,7 @@ class Gemma3Wrapper:
         language: str = "en",
         intervention_scope: str = DEFAULT_SCOPE,
         last_k: int = DEFAULT_LAST_K,
+        decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
     ) -> Tuple[float, float]:
         if positive_token_id is None or negative_token_id is None:
             pos, neg = self.get_stance_token_ids(language)
@@ -417,6 +441,7 @@ class Gemma3Wrapper:
             activation_multipliers=activation_multipliers,
             intervention_scope=intervention_scope,
             last_k=last_k,
+            decoder_normalization=decoder_normalization,
         )
         last_logits = logits[0, -1]
         probs = F.softmax(last_logits, dim=-1)
@@ -433,6 +458,7 @@ class Gemma3Wrapper:
         activation_multipliers: Optional[Dict[str, float]] = None,
         intervention_scope: str = DEFAULT_SCOPE,
         last_k: int = DEFAULT_LAST_K,
+        decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
     ) -> float:
         from utils.ipi_surrogate import expected_ipi_from_logits
 
@@ -441,5 +467,6 @@ class Gemma3Wrapper:
             activation_multipliers=activation_multipliers,
             intervention_scope=intervention_scope,
             last_k=last_k,
+            decoder_normalization=decoder_normalization,
         )
         return expected_ipi_from_logits(logits[0, -1, :], option_token_ids)

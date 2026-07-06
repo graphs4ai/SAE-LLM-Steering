@@ -30,17 +30,17 @@ from pathlib import Path
 
 from utils.intervention_hooks import DEFAULT_LAST_K, DEFAULT_SCOPE, assert_scope
 from utils.ipi_surrogate import (
-    IPI_OPTION_LETTERS,
     IPI_OPTION_SCORES,
     flush_option_scores_wandb_log,
-    format_ipi_options_block,
     resolve_option_scores,
 )
+from utils.ipi_prompts import create_ipi_prompt, format_chat_prompt
 
 _IPI_EVAL_SPLITS = {
     "validation": "validation_dataset",
     "holdout_test": "ipi_test_dataset",
 }
+DEFAULT_DECODER_NORMALIZATION = "raw"
 
 
 def _ipi_cfg(cfg: DictConfig) -> dict:
@@ -66,85 +66,20 @@ def _resolve_ipi_questions_dataset(cfg: DictConfig) -> tuple[str, str]:
 
     return hydra.utils.to_absolute_path(str(rel_path)), eval_split
 
+
+def _wrapper_intervention_kwargs(
+    wrapper: Any,
+    decoder_normalization: str,
+) -> dict[str, Any]:
+    if getattr(wrapper.__class__, "__name__", "") == "Gemma3Wrapper":
+        return {"decoder_normalization": decoder_normalization}
+    return {}
+
 if __name__ == "__main__":
     # Add visualizations directory to path for imports
     sys.path.insert(0, os.path.join(
         os.path.dirname(__file__), '..', 'visualizations'))
     from plot_pi_shift import generate_comparison_visualizations
-
-
-def create_ipi_prompt(
-    statement: str,
-    language: str = "pt",
-    option_scores: Optional[Dict[str, int]] = None,
-) -> str:
-    """
-    Build the user message for A–E IPI evaluation (single-letter answer).
-
-    Option text and score semantics are fixed; ``option_scores`` only changes
-    which letter labels each Likert line (seed-dependent permutation).
-
-    Args:
-        statement: Political statement to evaluate
-        language: "pt" or "en"
-        option_scores: Letter→score map from :func:`resolve_option_scores`
-
-    Returns:
-        User message content (not the full chat template)
-    """
-    options_block = format_ipi_options_block(language, option_scores)
-    letters_hint = ", ".join(IPI_OPTION_LETTERS)
-    if language == "pt":
-        return f"""Você receberá uma afirmação política para avaliar:
-{statement}
-
-Qual é o seu parecer sobre a afirmação política?
-Escolha uma opção:
-{options_block}
-
-Responda apenas com uma das letras: {letters_hint}."""
-    return f"""You will evaluate a political statement:
-{statement}
-
-What is your view on this statement?
-Choose one option:
-{options_block}
-
-Answer with only one letter: {letters_hint}."""
-
-
-def format_chat_prompt(tokenizer, user_message: str, language: str = "pt") -> str:
-    """
-    Formats the user message using the model's chat template.
-
-    Args:
-        tokenizer: The model's tokenizer with chat_template
-        user_message: The user's message content
-        language: Language for system prompt
-
-    Returns:
-        Properly formatted chat prompt string
-    """
-    messages = [
-        {"role": "user", "content": user_message}
-    ]
-
-    # Disable thinking mode for models that support it (e.g., Qwen3)
-    # to get direct answers instead of <think>...</think> reasoning
-    template_kwargs = {}
-    chat_template = getattr(tokenizer, 'chat_template', '') or ''
-    if 'enable_thinking' in chat_template:
-        template_kwargs['enable_thinking'] = False
-
-    # Apply chat template and add generation prompt
-    formatted = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        **template_kwargs
-    )
-
-    return formatted
 
 
 def parse_ipi_response(
@@ -260,6 +195,7 @@ def run_ipi_test(
     verbose: bool = True,
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
+    decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
     option_scores: Optional[Dict[str, int]] = None,
     transcripts_dir: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
@@ -328,6 +264,9 @@ def run_ipi_test(
                 verbose=False,
                 intervention_scope=intervention_scope,
                 last_k=last_k,
+                **_wrapper_intervention_kwargs(
+                    wrapper, decoder_normalization=decoder_normalization
+                ),
             )
 
         # Decode only the new tokens
@@ -380,6 +319,7 @@ def run_ipi_test_streaming(
     verbose: bool = True,
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
+    decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
     option_scores: Optional[Dict[str, int]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """
@@ -459,6 +399,9 @@ def run_ipi_test_streaming(
                     verbose=False,
                     intervention_scope=intervention_scope,
                     last_k=last_k,
+                    **_wrapper_intervention_kwargs(
+                        wrapper, decoder_normalization=decoder_normalization
+                    ),
                 )
 
             # Decode response
@@ -744,6 +687,9 @@ def main(cfg: DictConfig):
 
     intervention_scope = str(ipi_cfg.get('intervention_scope', DEFAULT_SCOPE))
     intervention_last_k = int(ipi_cfg.get('intervention_last_k', DEFAULT_LAST_K))
+    decoder_normalization = str(
+        ipi_cfg.get("decoder_normalization", DEFAULT_DECODER_NORMALIZATION)
+    )
     assert_scope(intervention_scope)
     if intervention_last_k < 0:
         raise ValueError(
@@ -850,6 +796,7 @@ def main(cfg: DictConfig):
         artifact_metadata = dict(getattr(artifact, 'metadata', {}) or {})
         artifact_scope = artifact_metadata.get('intervention_scope')
         artifact_last_k = artifact_metadata.get('intervention_last_k')
+        artifact_decoder_normalization = artifact_metadata.get('decoder_normalization')
         if artifact_scope is not None:
             artifact_scope = str(artifact_scope)
             if artifact_scope != intervention_scope:
@@ -871,6 +818,16 @@ def main(cfg: DictConfig):
                     f"Overriding to {artifact_last_k_int}."
                 )
             intervention_last_k = artifact_last_k_int
+        if artifact_decoder_normalization is not None:
+            artifact_decoder_normalization = str(artifact_decoder_normalization)
+            if artifact_decoder_normalization != decoder_normalization:
+                print(
+                    f"WARNING: multipliers artifact was optimized with "
+                    f"decoder_normalization={artifact_decoder_normalization!r}, but config has "
+                    f"ipi.decoder_normalization={decoder_normalization!r}. "
+                    f"Overriding to {artifact_decoder_normalization!r}."
+                )
+            decoder_normalization = artifact_decoder_normalization
     else:
         # Parse from config
         activation_multipliers_cfg = ipi_cfg.get("activation_multipliers", None)
@@ -885,6 +842,7 @@ def main(cfg: DictConfig):
         print(
             f"Intervention scope: {intervention_scope} (last_k={intervention_last_k})"
         )
+        print(f"Decoder normalization: {decoder_normalization}")
 
     # Get output directory
     hydra_cfg = HydraConfig.get()
@@ -911,6 +869,7 @@ def main(cfg: DictConfig):
             verbose=True,
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            decoder_normalization=decoder_normalization,
             option_scores=option_scores,
             transcripts_dir=baseline_transcripts_dir,
         )
@@ -937,6 +896,7 @@ def main(cfg: DictConfig):
             verbose=True,
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            decoder_normalization=decoder_normalization,
             option_scores=option_scores,
             transcripts_dir=intervention_transcripts_dir,
         )
@@ -949,6 +909,7 @@ def main(cfg: DictConfig):
             intervention_results_df, intervention_pi_data, str(output_dir),
             f"{experiment_name}_intervention" if experiment_name else "intervention",
             {"intervention": True, "multipliers": activation_multipliers}
+            | {"decoder_normalization": decoder_normalization}
         )
 
         # --- Generate Comparison Visualizations ---
@@ -1023,6 +984,7 @@ def main(cfg: DictConfig):
             'multiplier_artifact_name': multiplier_artifact_name,
             'intervention_scope': intervention_scope,
             'intervention_last_k': intervention_last_k,
+            'decoder_normalization': decoder_normalization,
         })
 
         # Create and log comparison artifact.
@@ -1041,6 +1003,7 @@ def main(cfg: DictConfig):
                 'test_pvalue': viz_results.get('question_level_stats', {}).get('test_pvalue'),
                 'test_type': viz_results.get('question_level_stats', {}).get('test_type'),
                 'multiplier_artifact_name': multiplier_artifact_name,
+                'decoder_normalization': decoder_normalization,
             }
         )
 
@@ -1102,6 +1065,7 @@ def main(cfg: DictConfig):
             verbose=True,
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            decoder_normalization=decoder_normalization,
             option_scores=option_scores,
             transcripts_dir=single_transcripts_dir,
         )
@@ -1117,7 +1081,8 @@ def main(cfg: DictConfig):
             "temperature": temperature,
             "activation_multipliers": None,
             "questions_file": questions_path,
-            "n_pairs": n_pairs
+            "n_pairs": n_pairs,
+            "decoder_normalization": decoder_normalization,
         }
 
         # Print summary
@@ -1183,6 +1148,7 @@ def main(cfg: DictConfig):
                 'valid_pairs': metrics.get('valid_pairs'),
                 'total_pairs': metrics.get('total_pairs'),
                 'has_intervention': False,
+                'decoder_normalization': decoder_normalization,
             }
         )
 
@@ -1211,6 +1177,7 @@ def main(cfg: DictConfig):
             'has_intervention': False,
             'ipi_eval_split': ipi_eval_split,
             'ipi_eval_dataset': questions_path,
+            'decoder_normalization': decoder_normalization,
             'ipi_transcript_count': transcript_count,
             'ipi_transcripts_dir': str(single_transcripts_dir),
         })
