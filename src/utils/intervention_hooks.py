@@ -154,10 +154,55 @@ def make_intervention_hook(
     return hook
 
 
+def make_delta_steering_hook(
+    steering_vector: torch.Tensor,
+    input_len: int,
+    scope: str = DEFAULT_SCOPE,
+    last_k: int = DEFAULT_LAST_K,
+    debug_seq_lens: Optional[List[int]] = None,
+) -> Callable[[torch.Tensor, object], torch.Tensor]:
+    """Build a hook that adds a fixed residual-stream delta on masked positions.
+
+    Used for SAE Option-2 additive decoded-delta intervention:
+    ``x' = x + sum_j alpha_j * W_dec[j]`` on selected token positions.
+    """
+    assert_scope(scope)
+    if last_k < 0:
+        raise ValueError(f"last_k must be >= 0, got {last_k!r}.")
+    if input_len < 0:
+        raise ValueError(f"input_len must be >= 0, got {input_len!r}.")
+
+    # Detach so the hook never retains autograd state from SAE weights.
+    steering_vector = steering_vector.detach()
+
+    def hook(resid: torch.Tensor, hook) -> torch.Tensor:  # noqa: ARG001
+        seq_len = int(resid.shape[1])
+        if debug_seq_lens is not None and len(debug_seq_lens) < 20:
+            debug_seq_lens.append(seq_len)
+
+        mask = _build_mask(
+            seq_len=seq_len,
+            input_len=input_len,
+            scope=scope,
+            last_k=last_k,
+            device=resid.device,
+        )
+        if not bool(mask.any()):
+            return resid
+
+        delta = steering_vector.to(device=resid.device, dtype=resid.dtype)
+        modified = resid.clone()
+        modified[:, mask, :] = modified[:, mask, :] + delta
+        return modified
+
+    return hook
+
+
 __all__ = [
     "DEFAULT_SCOPE",
     "DEFAULT_LAST_K",
     "VALID_SCOPES",
     "assert_scope",
     "make_intervention_hook",
+    "make_delta_steering_hook",
 ]

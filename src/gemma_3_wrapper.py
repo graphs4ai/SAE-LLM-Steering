@@ -8,6 +8,8 @@ from sae_lens.analysis.sae_transformer_bridge import SAETransformerBridge
 from utils.intervention_hooks import (
     DEFAULT_LAST_K,
     DEFAULT_SCOPE,
+    assert_scope,
+    make_delta_steering_hook,
 )
 
 
@@ -16,6 +18,7 @@ ALLOWED_SAE_LAYERS: tuple[int, ...] = (9, 17, 22, 29)
 DEFAULT_SAE_WIDTH = "65k"
 DEFAULT_SAE_L0 = "medium"
 DEFAULT_SAE_RELEASE = "gemma-scope-2-4b-it-res"
+INTERVENTION_MODE = "sae_decoded_delta_additive"
 
 # SAE metadata uses classic TL aliases; on SAETransformerBridge those live at
 # the BlockBridge hook names (see notebooks/gemma_scope2_playground.ipynb).
@@ -25,11 +28,18 @@ _TL_TO_BRIDGE = {
     "hook_resid_post": "hook_out",
 }
 
-_INTERVENTION_NOT_IMPLEMENTED = (
-    "SAE delta steering is not implemented yet. "
-    "Baseline generation (no activation_multipliers) still works; "
-    "feature interventions will land in optimize_sae_steering.py."
-)
+
+def parse_feature_coefficient_name(name: str) -> Tuple[int, int]:
+    """Parse ``layer_{L}-feature_{F}`` (also accepts ``neuron`` for compatibility)."""
+    parts = name.split("-")
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid feature coefficient name {name!r}. "
+            "Expected 'layer_{L}-feature_{F}'."
+        )
+    layer = int(parts[0].split("_")[1])
+    feature = int(parts[1].split("_")[1])
+    return layer, feature
 
 
 class Gemma3Wrapper:
@@ -37,8 +47,8 @@ class Gemma3Wrapper:
     Wrapper for Gemma-3 models using SAETransformerBridge + Gemma Scope 2 SAEs.
 
     Extracts SAE latent features at resid_post for layers in
-    ``ALLOWED_SAE_LAYERS``. Neuron-level interventions are stubbed until SAE
-    delta steering is implemented.
+    ``ALLOWED_SAE_LAYERS``. Interventions use Option-2 additive decoded-delta:
+    ``x' = x + sum_j alpha_j * W_dec[j]`` on resid_post / hook_out.
     """
 
     def __init__(
@@ -181,6 +191,89 @@ class Gemma3Wrapper:
                     f"got {sae.cfg.d_sae}, expected {self._d_sae}"
                 )
 
+    def _parse_layer_feature_alphas(
+        self,
+        activation_multipliers: Dict[str, float],
+    ) -> Dict[int, Dict[int, float]]:
+        """Group additive coefficients alpha_j by layer."""
+        layer_feature_alphas: Dict[int, Dict[int, float]] = {}
+        for name, alpha in activation_multipliers.items():
+            layer, feature = parse_feature_coefficient_name(name)
+            if layer not in ALLOWED_SAE_LAYERS:
+                raise ValueError(
+                    f"Feature {name!r} uses unsupported SAE layer {layer}. "
+                    f"Allowed: {list(ALLOWED_SAE_LAYERS)}"
+                )
+            layer_feature_alphas.setdefault(layer, {})[feature] = float(alpha)
+        return layer_feature_alphas
+
+    def _ensure_saes_for_coefficients(
+        self,
+        layer_feature_alphas: Dict[int, Dict[int, float]],
+    ) -> None:
+        missing = [
+            layer for layer in layer_feature_alphas if layer not in self.saes
+        ]
+        if missing:
+            self.load_saes(missing)
+
+    def _build_steering_vector(
+        self,
+        layer: int,
+        feature_alphas: Dict[int, float],
+    ) -> torch.Tensor:
+        """Linear-decoder Option-2 delta: sum_j alpha_j * W_dec[j]."""
+        sae = self.saes[layer]
+        w_dec = sae.W_dec
+        d_sae = int(sae.cfg.d_sae)
+        steering = torch.zeros(
+            w_dec.shape[1],
+            device=w_dec.device,
+            dtype=w_dec.dtype,
+        )
+        for feature_idx, alpha in feature_alphas.items():
+            if feature_idx < 0 or feature_idx >= d_sae:
+                raise ValueError(
+                    f"Feature index {feature_idx} out of range for layer {layer} "
+                    f"(d_sae={d_sae})."
+                )
+            if alpha == 0.0:
+                continue
+            steering = steering + alpha * w_dec[feature_idx]
+        return steering
+
+    def _build_delta_hooks(
+        self,
+        activation_multipliers: Dict[str, float],
+        input_len: int,
+        intervention_scope: str,
+        last_k: int,
+        debug_seq_lens: Optional[List[int]] = None,
+    ) -> List[Tuple[str, object]]:
+        assert_scope(intervention_scope)
+        layer_feature_alphas = self._parse_layer_feature_alphas(
+            activation_multipliers
+        )
+        self._ensure_saes_for_coefficients(layer_feature_alphas)
+
+        hooks: List[Tuple[str, object]] = []
+        for layer, feature_alphas in layer_feature_alphas.items():
+            steering_vector = self._build_steering_vector(layer, feature_alphas)
+            hook_name = self.sae_hook_names[layer]
+            hooks.append(
+                (
+                    hook_name,
+                    make_delta_steering_hook(
+                        steering_vector=steering_vector,
+                        input_len=input_len,
+                        scope=intervention_scope,
+                        last_k=last_k,
+                        debug_seq_lens=debug_seq_lens,
+                    ),
+                )
+            )
+        return hooks
+
     def get_layer_activations(
         self,
         tokens: torch.Tensor,
@@ -233,14 +326,11 @@ class Gemma3Wrapper:
         debug_seq_lens: Optional[List[int]] = None,
         **generate_kwargs,
     ) -> torch.Tensor:
-        if activation_multipliers:
-            raise NotImplementedError(_INTERVENTION_NOT_IMPLEMENTED)
-
         if eos_token_id is None:
             eos_token_id = self.model.tokenizer.eos_token_id
 
-        return self.model.generate(
-            input_ids.to(self.input_device),
+        input_ids = input_ids.to(self.input_device)
+        generate_kwargs_common = dict(
             max_new_tokens=max_new_tokens,
             temperature=temperature if temperature is not None else 1.0,
             do_sample=do_sample,
@@ -249,6 +339,22 @@ class Gemma3Wrapper:
             verbose=verbose,
             **generate_kwargs,
         )
+
+        if not activation_multipliers:
+            return self.model.generate(input_ids, **generate_kwargs_common)
+
+        input_len = int(input_ids.shape[-1])
+        hooks = self._build_delta_hooks(
+            activation_multipliers=activation_multipliers,
+            input_len=input_len,
+            intervention_scope=intervention_scope,
+            last_k=last_k,
+            debug_seq_lens=debug_seq_lens,
+        )
+
+        with torch.no_grad():
+            with self.model.hooks(fwd_hooks=hooks):
+                return self.model.generate(input_ids, **generate_kwargs_common)
 
     def get_stance_token_ids(self, language: str = "pt") -> Tuple[int, int]:
         """
@@ -266,6 +372,31 @@ class Gemma3Wrapper:
         neg_id = self.model.tokenizer.encode(neg, add_special_tokens=False)[0]
         return pos_id, neg_id
 
+    def _forward_logits(
+        self,
+        input_ids: torch.Tensor,
+        activation_multipliers: Optional[Dict[str, float]] = None,
+        intervention_scope: str = DEFAULT_SCOPE,
+        last_k: int = DEFAULT_LAST_K,
+    ) -> torch.Tensor:
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        input_ids = input_ids.to(self.input_device)
+
+        if not activation_multipliers:
+            with torch.no_grad():
+                return self.model(input_ids)
+
+        input_len = int(input_ids.shape[1])
+        hooks = self._build_delta_hooks(
+            activation_multipliers=activation_multipliers,
+            input_len=input_len,
+            intervention_scope=intervention_scope,
+            last_k=last_k,
+        )
+        with torch.no_grad():
+            return self.model.run_with_hooks(input_ids, fwd_hooks=hooks)
+
     def get_soft_stance_score(
         self,
         input_ids: torch.Tensor,
@@ -276,22 +407,17 @@ class Gemma3Wrapper:
         intervention_scope: str = DEFAULT_SCOPE,
         last_k: int = DEFAULT_LAST_K,
     ) -> Tuple[float, float]:
-        if activation_multipliers:
-            raise NotImplementedError(_INTERVENTION_NOT_IMPLEMENTED)
-
         if positive_token_id is None or negative_token_id is None:
             pos, neg = self.get_stance_token_ids(language)
             positive_token_id = positive_token_id or pos
             negative_token_id = negative_token_id or neg
 
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-
-        input_ids = input_ids.to(self.input_device)
-
-        with torch.no_grad():
-            logits = self.model(input_ids)
-
+        logits = self._forward_logits(
+            input_ids=input_ids,
+            activation_multipliers=activation_multipliers,
+            intervention_scope=intervention_scope,
+            last_k=last_k,
+        )
         last_logits = logits[0, -1]
         probs = F.softmax(last_logits, dim=-1)
 
@@ -308,13 +434,12 @@ class Gemma3Wrapper:
         intervention_scope: str = DEFAULT_SCOPE,
         last_k: int = DEFAULT_LAST_K,
     ) -> float:
-        from utils.ipi_surrogate import get_expected_ipi_score
+        from utils.ipi_surrogate import expected_ipi_from_logits
 
-        return get_expected_ipi_score(
-            wrapper=self,
+        logits = self._forward_logits(
             input_ids=input_ids,
-            option_token_ids=option_token_ids,
             activation_multipliers=activation_multipliers,
             intervention_scope=intervention_scope,
             last_k=last_k,
         )
+        return expected_ipi_from_logits(logits[0, -1, :], option_token_ids)
