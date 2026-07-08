@@ -10,6 +10,7 @@ dependencies = [
     "ipykernel",
     "jupyterlab",
     "matplotlib",
+    "numba>=0.59",
     "numpy",
     "omegaconf",
     "optuna",
@@ -24,6 +25,7 @@ dependencies = [
     "tqdm",
     "transformer-lens",
     "transformers",
+    "umap-learn>=0.5.6",
     "wandb",
 ]
 
