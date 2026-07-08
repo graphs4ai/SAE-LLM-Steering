@@ -41,6 +41,10 @@ _IPI_EVAL_SPLITS = {
     "holdout_test": "ipi_test_dataset",
 }
 DEFAULT_DECODER_NORMALIZATION = "raw"
+EDIT_MODE_DECODER_DELTA = "decoder_delta_additive"
+EDIT_MODE_LATENT_CLAMP = "latent_clamp_additive"
+VALID_EDIT_MODES = (EDIT_MODE_DECODER_DELTA, EDIT_MODE_LATENT_CLAMP)
+DEFAULT_EDIT_MODE = EDIT_MODE_DECODER_DELTA
 
 
 def _ipi_cfg(cfg: DictConfig) -> dict:
@@ -70,9 +74,13 @@ def _resolve_ipi_questions_dataset(cfg: DictConfig) -> tuple[str, str]:
 def _wrapper_intervention_kwargs(
     wrapper: Any,
     decoder_normalization: str,
+    edit_mode: str = DEFAULT_EDIT_MODE,
 ) -> dict[str, Any]:
     if getattr(wrapper.__class__, "__name__", "") == "Gemma3Wrapper":
-        return {"decoder_normalization": decoder_normalization}
+        return {
+            "decoder_normalization": decoder_normalization,
+            "edit_mode": edit_mode,
+        }
     return {}
 
 if __name__ == "__main__":
@@ -196,6 +204,7 @@ def run_ipi_test(
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
     decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
+    edit_mode: str = DEFAULT_EDIT_MODE,
     option_scores: Optional[Dict[str, int]] = None,
     transcripts_dir: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
@@ -265,7 +274,9 @@ def run_ipi_test(
                 intervention_scope=intervention_scope,
                 last_k=last_k,
                 **_wrapper_intervention_kwargs(
-                    wrapper, decoder_normalization=decoder_normalization
+                    wrapper,
+                    decoder_normalization=decoder_normalization,
+                    edit_mode=edit_mode,
                 ),
             )
 
@@ -320,6 +331,7 @@ def run_ipi_test_streaming(
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
     decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
+    edit_mode: str = DEFAULT_EDIT_MODE,
     option_scores: Optional[Dict[str, int]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """
@@ -400,7 +412,9 @@ def run_ipi_test_streaming(
                     intervention_scope=intervention_scope,
                     last_k=last_k,
                     **_wrapper_intervention_kwargs(
-                        wrapper, decoder_normalization=decoder_normalization
+                        wrapper,
+                        decoder_normalization=decoder_normalization,
+                        edit_mode=edit_mode,
                     ),
                 )
 
@@ -690,6 +704,11 @@ def main(cfg: DictConfig):
     decoder_normalization = str(
         ipi_cfg.get("decoder_normalization", DEFAULT_DECODER_NORMALIZATION)
     )
+    edit_mode = str(ipi_cfg.get("edit_mode", DEFAULT_EDIT_MODE))
+    if edit_mode not in VALID_EDIT_MODES:
+        raise ValueError(
+            f"Invalid ipi.edit_mode={edit_mode!r}. Expected one of {VALID_EDIT_MODES}."
+        )
     assert_scope(intervention_scope)
     if intervention_last_k < 0:
         raise ValueError(
@@ -828,6 +847,22 @@ def main(cfg: DictConfig):
                     f"Overriding to {artifact_decoder_normalization!r}."
                 )
             decoder_normalization = artifact_decoder_normalization
+        artifact_edit_mode = artifact_metadata.get('edit_mode')
+        if artifact_edit_mode is not None:
+            artifact_edit_mode = str(artifact_edit_mode)
+            if artifact_edit_mode != edit_mode:
+                print(
+                    f"WARNING: multipliers artifact was optimized with "
+                    f"edit_mode={artifact_edit_mode!r}, but config has "
+                    f"ipi.edit_mode={edit_mode!r}. "
+                    f"Overriding to {artifact_edit_mode!r} to keep eval consistent."
+                )
+            if artifact_edit_mode not in VALID_EDIT_MODES:
+                raise ValueError(
+                    f"Multipliers artifact edit_mode={artifact_edit_mode!r} is "
+                    f"not one of {VALID_EDIT_MODES}."
+                )
+            edit_mode = artifact_edit_mode
     else:
         # Parse from config
         activation_multipliers_cfg = ipi_cfg.get("activation_multipliers", None)
@@ -836,6 +871,14 @@ def main(cfg: DictConfig):
             activation_multipliers = {str(k): float(v)
                                       for k, v in dict(activation_multipliers_cfg).items()}
 
+    if edit_mode == EDIT_MODE_LATENT_CLAMP and decoder_normalization != "raw":
+        print(
+            f"NOTE: using decoder_normalization='raw' for "
+            f"edit_mode={EDIT_MODE_LATENT_CLAMP!r} "
+            f"(ignoring {decoder_normalization!r} from config/artifact)."
+        )
+        decoder_normalization = "raw"
+
     if activation_multipliers:
         print(
             f"\nActivation intervention configured: {len(activation_multipliers)} neurons")
@@ -843,6 +886,7 @@ def main(cfg: DictConfig):
             f"Intervention scope: {intervention_scope} (last_k={intervention_last_k})"
         )
         print(f"Decoder normalization: {decoder_normalization}")
+        print(f"Edit mode: {edit_mode}")
 
     # Get output directory
     hydra_cfg = HydraConfig.get()
@@ -870,6 +914,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             decoder_normalization=decoder_normalization,
+            edit_mode=edit_mode,
             option_scores=option_scores,
             transcripts_dir=baseline_transcripts_dir,
         )
@@ -897,6 +942,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             decoder_normalization=decoder_normalization,
+            edit_mode=edit_mode,
             option_scores=option_scores,
             transcripts_dir=intervention_transcripts_dir,
         )
@@ -909,7 +955,7 @@ def main(cfg: DictConfig):
             intervention_results_df, intervention_pi_data, str(output_dir),
             f"{experiment_name}_intervention" if experiment_name else "intervention",
             {"intervention": True, "multipliers": activation_multipliers}
-            | {"decoder_normalization": decoder_normalization}
+            | {"decoder_normalization": decoder_normalization, "edit_mode": edit_mode}
         )
 
         # --- Generate Comparison Visualizations ---
@@ -985,6 +1031,7 @@ def main(cfg: DictConfig):
             'intervention_scope': intervention_scope,
             'intervention_last_k': intervention_last_k,
             'decoder_normalization': decoder_normalization,
+            'edit_mode': edit_mode,
         })
 
         # Create and log comparison artifact.
@@ -1004,6 +1051,7 @@ def main(cfg: DictConfig):
                 'test_type': viz_results.get('question_level_stats', {}).get('test_type'),
                 'multiplier_artifact_name': multiplier_artifact_name,
                 'decoder_normalization': decoder_normalization,
+                'edit_mode': edit_mode,
             }
         )
 
@@ -1066,6 +1114,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             decoder_normalization=decoder_normalization,
+            edit_mode=edit_mode,
             option_scores=option_scores,
             transcripts_dir=single_transcripts_dir,
         )
@@ -1083,6 +1132,7 @@ def main(cfg: DictConfig):
             "questions_file": questions_path,
             "n_pairs": n_pairs,
             "decoder_normalization": decoder_normalization,
+            "edit_mode": edit_mode,
         }
 
         # Print summary
@@ -1149,6 +1199,7 @@ def main(cfg: DictConfig):
                 'total_pairs': metrics.get('total_pairs'),
                 'has_intervention': False,
                 'decoder_normalization': decoder_normalization,
+                'edit_mode': edit_mode,
             }
         )
 
@@ -1178,6 +1229,7 @@ def main(cfg: DictConfig):
             'ipi_eval_split': ipi_eval_split,
             'ipi_eval_dataset': questions_path,
             'decoder_normalization': decoder_normalization,
+            'edit_mode': edit_mode,
             'ipi_transcript_count': transcript_count,
             'ipi_transcripts_dir': str(single_transcripts_dir),
         })

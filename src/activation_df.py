@@ -1,7 +1,9 @@
 import pandas as pd
 import torch
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+METADATA_COLS = frozenset({"class", "pair_key", "row_id", "statement"})
 
 
 class ActivationDataFrame:
@@ -22,6 +24,43 @@ class ActivationDataFrame:
         self._df: Optional[pd.DataFrame] = None
         self._layers = sorted(layers)
         self._d_features = d_features
+
+    def feature_column_names(self) -> List[str]:
+        """Return ordered SAE feature column names (layer_m-feature_n)."""
+        cols: List[str] = []
+        for layer in self._layers:
+            for feature in range(self._d_features):
+                cols.append(f"layer_{layer}-feature_{feature}")
+        return cols
+
+    def get_array(self) -> Tuple[np.ndarray, List[str]]:
+        """
+        Return activation matrix as numpy array.
+
+        Returns:
+            X: float32 array of shape (n_samples, n_features).
+            feature_columns: ordered column names matching X's second axis.
+        """
+        feature_columns = self.feature_column_names()
+        if self._df is not None:
+            meta_in_df = [c for c in self._df.columns if c in METADATA_COLS]
+            feature_cols = [c for c in self._df.columns if c not in meta_in_df]
+            if not feature_cols:
+                feature_cols = feature_columns
+            return self._df[feature_cols].to_numpy(dtype=np.float32), feature_cols
+
+        if not self._activations_list:
+            return np.empty((0, len(feature_columns)), dtype=np.float32), feature_columns
+
+        return np.concatenate(self._activations_list, axis=0), feature_columns
+
+    def get_metadata(self) -> pd.DataFrame:
+        """Return per-row metadata (class, pair_key, etc.) without feature columns."""
+        df = self.get_df()
+        if df.empty:
+            return pd.DataFrame()
+        meta_cols = [c for c in df.columns if c in METADATA_COLS or c in self._metadata_lists]
+        return df[meta_cols].reset_index(drop=True)
 
     def add_batch(
         self,

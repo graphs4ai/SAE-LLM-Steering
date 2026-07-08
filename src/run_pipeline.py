@@ -11,6 +11,7 @@ from omegaconf import DictConfig
 
 
 from utils.experiment_ids import (
+    format_layers_slug,
     make_activation_artifact_name,
     make_feature_ranking_artifact_name,
     make_ipi_artifact_name,
@@ -553,7 +554,7 @@ def main(cfg: DictConfig) -> None:
     ranking_top_n = int(cfg.feature_selection.get("ranking_top_n", 256))
     extraction_cfg = cfg.get("extraction", {})
     layers_cfg = extraction_cfg.get("layers", "all")
-    layers = "all" if isinstance(layers_cfg, str) else str(list(layers_cfg))
+    layers = format_layers_slug(layers_cfg)
 
     # Intervention scope axis. Missing `scopes` field means single-scope sweep
     # at the legacy default, which keeps existing experiment yamls

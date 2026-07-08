@@ -11,6 +11,7 @@ import wandb
 
 from utils.ipi_prompts import build_ipi_chat_prompt
 from utils.ipi_surrogate import resolve_option_scores
+from utils.experiment_ids import format_layers_slug
 
 
 def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
@@ -89,7 +90,7 @@ def main(cfg: DictConfig):
         '.csv', '').replace('_propositions', '')
     model_name = cfg.model.name.split('/')[-1]
     layers = cfg.extraction.layers
-    layers_str = 'all' if layers == 'all' else f"L{str(layers)}"
+    layers_str = format_layers_slug(layers)
 
     # Orchestrator-driven name takes precedence over the dataset-derived default
     # so a sweep can pin a deterministic identity (see src/utils/experiment_ids.py).

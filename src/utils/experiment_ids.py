@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 """Deterministic experiment/run and artifact name builders."""
 
 
@@ -11,6 +13,20 @@ _DEFAULT_SCOPE = "prompt_without_buffer"
 def _normalize(value: str) -> str:
     """Normalize free-text identifiers into stable slug-like fragments."""
     return value.strip().replace("/", "-").replace(" ", "-")
+
+
+def format_layers_slug(layers_cfg: Any) -> str:
+    """Return a Hydra-safe slug for SAE layer selection (no ``[``/``]``).
+
+    Examples:
+        ``"all"`` -> ``"all"``
+        ``[9, 17, 22, 29]`` -> ``"L9-17-22-29"``
+    """
+    if isinstance(layers_cfg, str):
+        if layers_cfg.lower() == "all":
+            return "all"
+        return _normalize(layers_cfg)
+    return "L" + "-".join(str(int(layer)) for layer in layers_cfg)
 
 
 def scope_identity_suffix(scope: str | None, last_k: int | None) -> str:
@@ -140,7 +156,12 @@ if __name__ == "__main__":
         "activations": make_activation_artifact_name(
             model_name="gemma-3-4b",
             split_id="three_way_split_v1",
-            layers="all",
+            layers=format_layers_slug("all"),
+        ),
+        "activations_layers_list": make_activation_artifact_name(
+            model_name="gemma-3-4b",
+            split_id="three_way_split_v1",
+            layers=format_layers_slug([9, 17, 22, 29]),
         ),
         "feature_ranking": make_feature_ranking_artifact_name(
             model_name="gemma-3-4b",

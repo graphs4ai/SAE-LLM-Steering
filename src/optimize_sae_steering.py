@@ -32,10 +32,16 @@ from utils.intervention_hooks import (
     DEFAULT_SCOPE,
     assert_scope,
 )
+from utils.sae_steering import compute_latent_clamp_bounds
 
 
 INTERVENTION_MODE = "sae_decoded_delta_additive"
 DEFAULT_DECODER_NORMALIZATION = "unit_norm"
+EDIT_MODE_DECODER_DELTA = "decoder_delta_additive"
+EDIT_MODE_LATENT_CLAMP = "latent_clamp_additive"
+VALID_EDIT_MODES = (EDIT_MODE_DECODER_DELTA, EDIT_MODE_LATENT_CLAMP)
+DEFAULT_EDIT_MODE = EDIT_MODE_DECODER_DELTA
+DEFAULT_BOUNDS_MULTIPLIER = 1.5
 
 
 def _ranked_feature_to_feature_name(entry: dict[str, Any]) -> str:
@@ -56,9 +62,13 @@ def _ranked_feature_to_feature_name(entry: dict[str, Any]) -> str:
 def _wrapper_intervention_kwargs(
     wrapper: Any,
     decoder_normalization: str,
+    edit_mode: str = DEFAULT_EDIT_MODE,
 ) -> dict[str, Any]:
     if getattr(wrapper.__class__, "__name__", "") == "Gemma3Wrapper":
-        return {"decoder_normalization": decoder_normalization}
+        return {
+            "decoder_normalization": decoder_normalization,
+            "edit_mode": edit_mode,
+        }
     return {}
 
 
@@ -145,7 +155,7 @@ class OutputLogger:
 def build_multipliers_from_trial(
     trial: optuna.Trial,
     target_features: List[str],
-    bounds: Tuple[float, float]
+    bounds: Dict[str, Tuple[float, float]]
 ) -> Dict[str, float]:
     """
     Builds additive SAE coefficient dictionary from Optuna trial suggestions.
@@ -156,17 +166,21 @@ def build_multipliers_from_trial(
     Args:
         trial: Optuna trial object
         target_features: List of feature identifiers (format: 'layer_X-feature_Y')
-        bounds: Tuple of (min, max) bounds for alpha values
+        bounds: Per-feature (min, max) bounds for alpha values. Callers that
+            want a single shared box (the historical behavior) should
+            broadcast it to every feature name before calling this function;
+            see `compute_latent_clamp_bounds` for the data-derived alternative.
 
     Returns:
         Dictionary mapping feature identifiers to suggested alpha values
     """
     multipliers = {}
     for feature_name in target_features:
+        lo, hi = bounds[feature_name]
         multipliers[feature_name] = trial.suggest_float(
             feature_name,
-            bounds[0],
-            bounds[1]
+            lo,
+            hi,
         )
     return multipliers
 
@@ -176,7 +190,7 @@ def soft_objective(
     wrapper,
     questions_df: pd.DataFrame,
     target_features: List[str],
-    bounds: Tuple[float, float],
+    bounds: Dict[str, Tuple[float, float]],
     option_token_ids: dict[int, list[int]],
     language: str = "pt",
     option_scores: Optional[Dict[str, int]] = None,
@@ -185,6 +199,7 @@ def soft_objective(
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
     decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
+    edit_mode: str = DEFAULT_EDIT_MODE,
 ) -> float:
     """
     Soft IPI objective using expected IPI over A–E option letters.
@@ -246,7 +261,9 @@ def soft_objective(
                 intervention_scope=intervention_scope,
                 last_k=last_k,
                 **_wrapper_intervention_kwargs(
-                    wrapper, decoder_normalization=decoder_normalization
+                    wrapper,
+                    decoder_normalization=decoder_normalization,
+                    edit_mode=edit_mode,
                 ),
             )
 
@@ -285,7 +302,7 @@ def objective(
     questions_df: pd.DataFrame,
     baseline_scores: List[int],
     target_features: List[str],
-    bounds: Tuple[float, float],
+    bounds: Dict[str, Tuple[float, float]],
     language: str = "pt",
     max_new_tokens: int = 10,
     temperature: float = 0.0,
@@ -452,7 +469,10 @@ def save_optimization_results(
     soft_metrics: Optional[Dict[str, float]] = None,
     coefficient_type: str = "beta",
     decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
-    edit_mode: str = "additive_latent_delta",
+    edit_mode: str = DEFAULT_EDIT_MODE,
+    auto_bounds: bool = False,
+    bounds_multiplier: Optional[float] = None,
+    resolved_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> str:
     """
     Saves optimization results to JSON file.
@@ -488,6 +508,9 @@ def save_optimization_results(
                 'coefficient_type': coefficient_type,
                 'decoder_normalization': decoder_normalization,
                 'edit_mode': edit_mode,
+                'auto_bounds': auto_bounds,
+                'bounds_multiplier': bounds_multiplier,
+                'resolved_bounds': resolved_bounds,
             },
             'all_trials': [
                 {
@@ -512,6 +535,9 @@ def save_optimization_results(
             'coefficient_type': coefficient_type,
             'decoder_normalization': decoder_normalization,
             'edit_mode': edit_mode,
+            'auto_bounds': auto_bounds,
+            'bounds_multiplier': bounds_multiplier,
+            'resolved_bounds': resolved_bounds,
             'pareto_front': [
                 {
                     'trial_number': t.number,
@@ -628,6 +654,7 @@ def compute_soft_scores(
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
     decoder_normalization: str = DEFAULT_DECODER_NORMALIZATION,
+    edit_mode: str = DEFAULT_EDIT_MODE,
 ) -> Tuple[float, float]:
     """
     Computes signed and absolute soft score for a questions dataset.
@@ -680,7 +707,9 @@ def compute_soft_scores(
                 intervention_scope=intervention_scope,
                 last_k=last_k,
                 **_wrapper_intervention_kwargs(
-                    wrapper, decoder_normalization=decoder_normalization
+                    wrapper,
+                    decoder_normalization=decoder_normalization,
+                    edit_mode=edit_mode,
                 ),
             )
 
@@ -748,6 +777,25 @@ def main(cfg: DictConfig):
         decoder_normalization = str(
             opt_cfg.get('decoder_normalization', DEFAULT_DECODER_NORMALIZATION)
         )
+        edit_mode = str(opt_cfg.get('edit_mode', DEFAULT_EDIT_MODE))
+        auto_bounds = bool(opt_cfg.get('auto_bounds', False))
+        bounds_multiplier = float(
+            opt_cfg.get('bounds_multiplier', DEFAULT_BOUNDS_MULTIPLIER)
+        )
+
+        if edit_mode not in VALID_EDIT_MODES:
+            raise ValueError(
+                f"Invalid optimization.edit_mode={edit_mode!r}. "
+                f"Expected one of {VALID_EDIT_MODES}."
+            )
+        if auto_bounds and edit_mode != EDIT_MODE_LATENT_CLAMP:
+            raise ValueError(
+                f"optimization.auto_bounds=True requires "
+                f"optimization.edit_mode={EDIT_MODE_LATENT_CLAMP!r} (got "
+                f"{edit_mode!r}): mean_left/mean_right feature statistics are "
+                "in latent-activation units and are not a meaningful scale "
+                f"reference for {EDIT_MODE_DECODER_DELTA!r}."
+            )
 
         if top_k is None or int(top_k) <= 0:
             raise ValueError(
@@ -822,6 +870,16 @@ def main(cfg: DictConfig):
                     decoder_normalization,
                 )
             )
+            if edit_mode == EDIT_MODE_LATENT_CLAMP:
+                artifact_decoder_norm = decoder_normalization
+                decoder_normalization = "raw"
+                if artifact_decoder_norm != "raw":
+                    print(
+                        "NOTE: feature ranking artifact has "
+                        f"decoder_normalization={artifact_decoder_norm!r}; "
+                        f"using 'raw' for edit_mode={EDIT_MODE_LATENT_CLAMP!r} "
+                        "(latent clamp decodes through the SAE's raw W_dec)."
+                    )
 
             print(
                 f"Loaded feature ranking with {len(ranked_features)} features")
@@ -835,6 +893,15 @@ def main(cfg: DictConfig):
                 _ranked_feature_to_feature_name(feature_entry)
                 for feature_entry in selected_features
             ]
+            # mean_left/mean_right (paired_contrastive only) power auto_bounds;
+            # entries default to None under feature_selection.method=mean_activation.
+            feature_stats: Dict[str, Dict[str, Optional[float]]] = {
+                _ranked_feature_to_feature_name(feature_entry): {
+                    "mean_left": feature_entry.get("mean_left"),
+                    "mean_right": feature_entry.get("mean_right"),
+                }
+                for feature_entry in selected_features
+            }
             print(
                 f"Selected {len(target_features)} target SAE features "
                 f"from ranked_features[:top_k]"
@@ -848,8 +915,22 @@ def main(cfg: DictConfig):
                     "optimization.target_neurons must be set."
                 )
             target_features = list(configured)
+            # No ranking artifact available manually; auto_bounds will fall
+            # back to the global `bounds` box for every feature (with warnings).
+            feature_stats = {
+                name: {"mean_left": None, "mean_right": None}
+                for name in target_features
+            }
 
         bounds = (opt_cfg.bounds[0], opt_cfg.bounds[1])
+        if auto_bounds:
+            bounds_by_feature = compute_latent_clamp_bounds(
+                ranked_feature_stats=feature_stats,
+                multiplier=bounds_multiplier,
+                fallback_bounds=bounds,
+            )
+        else:
+            bounds_by_feature = {name: bounds for name in target_features}
         study_name = opt_cfg.study_name
         storage = opt_cfg.get('storage', None)
         load_if_exists = opt_cfg.get('load_if_exists', True)
@@ -892,7 +973,17 @@ def main(cfg: DictConfig):
         print(f"\nTarget SAE features ({len(target_features)}):")
         for n in target_features:
             print(f"  - {n}")
-        print(f"\nAdditive coefficient bounds: [{bounds[0]}, {bounds[1]}]")
+        print(f"\nEdit mode: {edit_mode}")
+        if auto_bounds:
+            lo_values = [b[0] for b in bounds_by_feature.values()]
+            hi_values = [b[1] for b in bounds_by_feature.values()]
+            print(
+                f"Additive coefficient bounds: auto (multiplier={bounds_multiplier}), "
+                f"per-feature range=[{min(lo_values):.2f}, {max(hi_values):.2f}] "
+                f"(fallback box=[{bounds[0]}, {bounds[1]}])"
+            )
+        else:
+            print(f"Additive coefficient bounds: [{bounds[0]}, {bounds[1]}]")
         print(f"Decoder normalization: {decoder_normalization}")
         print(f"Number of trials: {n_trials}")
         print(f"Intervention scope: {intervention_scope} (last_k={intervention_last_k})")
@@ -994,6 +1085,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             decoder_normalization=decoder_normalization,
+            edit_mode=edit_mode,
         )
         baseline_val_signed_soft, baseline_val_abs_soft = compute_soft_scores(
             wrapper=wrapper,
@@ -1006,6 +1098,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             decoder_normalization=decoder_normalization,
+            edit_mode=edit_mode,
         )
 
         # Create sampler based on config
@@ -1055,7 +1148,7 @@ def main(cfg: DictConfig):
                 wrapper=wrapper,
                 questions_df=optim_questions_df,
                 target_features=target_features,
-                bounds=bounds,
+                bounds=bounds_by_feature,
                 option_token_ids=option_token_ids,
                 language=language,
                 option_scores=option_scores,
@@ -1063,6 +1156,7 @@ def main(cfg: DictConfig):
                 intervention_scope=intervention_scope,
                 last_k=intervention_last_k,
                 decoder_normalization=decoder_normalization,
+                edit_mode=edit_mode,
             ),
             n_trials=n_trials,
             show_progress_bar=True
@@ -1085,6 +1179,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             decoder_normalization=decoder_normalization,
+            edit_mode=edit_mode,
         )
         val_intervened_signed, val_intervened_abs = compute_soft_scores(
             wrapper=wrapper,
@@ -1097,6 +1192,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             decoder_normalization=decoder_normalization,
+            edit_mode=edit_mode,
         )
 
         if use_absolute:
@@ -1150,7 +1246,10 @@ def main(cfg: DictConfig):
             soft_metrics=soft_metrics,
             coefficient_type="beta",
             decoder_normalization=decoder_normalization,
-            edit_mode="additive_latent_delta",
+            edit_mode=edit_mode,
+            auto_bounds=auto_bounds,
+            bounds_multiplier=bounds_multiplier if auto_bounds else None,
+            resolved_bounds=bounds_by_feature if auto_bounds else None,
         )
 
         print(f"\nResults saved to: {results_path}")
@@ -1227,7 +1326,9 @@ def main(cfg: DictConfig):
                 'intervention_mode': INTERVENTION_MODE,
                 'coefficient_type': 'beta',
                 'decoder_normalization': decoder_normalization,
-                'edit_mode': 'additive_latent_delta',
+                'edit_mode': edit_mode,
+                'auto_bounds': auto_bounds,
+                'bounds_multiplier': bounds_multiplier if auto_bounds else None,
                 'surrogate': 'expected_ipi_ae',
                 'seed_dependent_option_scores': shuffle_option_scores,
                 'option_mapping_seed': option_mapping_seed,
@@ -1261,7 +1362,9 @@ def main(cfg: DictConfig):
             'intervention_mode': INTERVENTION_MODE,
             'coefficient_type': 'beta',
             'decoder_normalization': decoder_normalization,
-            'edit_mode': 'additive_latent_delta',
+            'edit_mode': edit_mode,
+            'auto_bounds': auto_bounds,
+            'bounds_multiplier': bounds_multiplier if auto_bounds else None,
             **soft_metrics,
         })
 
