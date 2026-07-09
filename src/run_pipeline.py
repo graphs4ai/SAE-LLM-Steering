@@ -78,6 +78,44 @@ def _experiment_cli_prefix(cfg: DictConfig) -> str:
     return " ".join(parts) + " "
 
 
+def _resolve_sae_widths(experiment: DictConfig, extraction_cfg: DictConfig) -> list[str]:
+    """Experiment sweep axis, or a single value from composed extraction config."""
+    values_cfg = experiment.get("sae_widths", None)
+    if values_cfg is None:
+        return [str(extraction_cfg.get("sae_width", "65k"))]
+    return [str(value) for value in values_cfg]
+
+
+def _resolve_bounds_multipliers(
+    experiment: DictConfig,
+    optimization_cfg: DictConfig,
+) -> list[float]:
+    """Experiment sweep axis, or a single value from composed optimization config."""
+    values_cfg = experiment.get("bounds_multipliers", None)
+    if values_cfg is None:
+        return [float(optimization_cfg.get("bounds_multiplier", 3.0))]
+    return [float(value) for value in values_cfg]
+
+
+def _sae_width_cli_override(sae_width: str) -> str:
+    return f"extraction.sae_width={sae_width} "
+
+
+def _bounds_multiplier_cli_override(bounds_multiplier: float) -> str:
+    numeric = float(bounds_multiplier)
+    if numeric.is_integer():
+        return f"optimization.bounds_multiplier={int(numeric)} "
+    return f"optimization.bounds_multiplier={numeric:g} "
+
+
+def _model_stage_cli_overrides(sae_width: str, bounds_multiplier: float) -> str:
+    """Hydra overrides threaded into every subprocess that loads the model."""
+    return (
+        _sae_width_cli_override(sae_width)
+        + _bounds_multiplier_cli_override(bounds_multiplier)
+    )
+
+
 def _build_commands(
     model_cfg_name: str,
     direction: str,
@@ -88,6 +126,8 @@ def _build_commands(
     artifact_names: dict[str, str],
     intervention_scope: str,
     intervention_last_k: int,
+    sae_width: str,
+    bounds_multiplier: float,
     resolved: ResolvedSeeds,
     cfg: DictConfig,
 ) -> list[str]:
@@ -112,6 +152,7 @@ def _build_commands(
     multipliers_ref = f"{multipliers_name}:latest"
     seed_args = seed_cli_overrides(resolved)
     experiment_prefix = _experiment_cli_prefix(cfg)
+    model_stage_args = _model_stage_cli_overrides(sae_width, bounds_multiplier)
 
     cmds: list[str] = []
     if stages.get("extract_activations", False):
@@ -119,6 +160,7 @@ def _build_commands(
             "python src/extract_activations.py "
             f"{experiment_prefix}"
             f"model={model_cfg_name} "
+            f"{model_stage_args}"
             f"artifacts.activations_name={activations_name} "
             f"{seed_args}"
         )
@@ -127,6 +169,7 @@ def _build_commands(
             "python src/select_sae_features.py "
             f"{experiment_prefix}"
             f"model={model_cfg_name} "
+            f"{_sae_width_cli_override(sae_width)}"
             f"data.activations_artifact_name={activations_ref} "
             f"artifacts.feature_ranking_name={feature_ranking_name} "
             f"{seed_args}"
@@ -136,6 +179,7 @@ def _build_commands(
             "python src/optimize_sae_steering.py "
             f"{experiment_prefix}"
             f"model={model_cfg_name} "
+            f"{model_stage_args}"
             f"optimization.direction={direction} "
             f"optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
@@ -149,7 +193,9 @@ def _build_commands(
         cmds.append(
             "python src/ipi_eval.py "
             f"{experiment_prefix}"
-            f"model={model_cfg_name} ipi.condition=baseline "
+            f"model={model_cfg_name} "
+            f"{_sae_width_cli_override(sae_width)}"
+            f"ipi.condition=baseline "
             "ipi.multiplier_artifact_name=null "
             f"ipi.intervention_scope={intervention_scope} "
             f"ipi.intervention_last_k={intervention_last_k} "
@@ -160,7 +206,9 @@ def _build_commands(
         cmds.append(
             "python src/ipi_eval.py "
             f"{experiment_prefix}"
-            f"model={model_cfg_name} ipi.condition=intervened "
+            f"model={model_cfg_name} "
+            f"{model_stage_args}"
+            f"ipi.condition=intervened "
             f"optimization.direction={direction} optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
             f"ipi.intervention_scope={intervention_scope} "
@@ -172,7 +220,9 @@ def _build_commands(
     if stages.get("poeta", False):
         cmds.append(
             f"python src/poeta_evaluator.py {experiment_prefix}"
-            f"model={model_cfg_name} {seed_args}"
+            f"model={model_cfg_name} "
+            f"{_sae_width_cli_override(sae_width)}"
+            f"{seed_args}"
         )
     return cmds
 
@@ -350,6 +400,8 @@ def _plan_matrix_for_seed(
     intervention_last_k: int,
     ranking_top_n: int,
     layers: str,
+    sae_widths: list[str],
+    bounds_multipliers: list[float],
     trial_grid: dict[str, Any],
     output_root: Path,
     dry_run: bool,
@@ -363,7 +415,7 @@ def _plan_matrix_for_seed(
     counters: dict[str, int],
 ) -> None:
     """Plan (and optionally execute) the model x direction x top_k x n_trials x
-    scope matrix for one fully-resolved seed.
+    scope x sae_width x bounds_multiplier matrix for one fully-resolved seed.
 
     Everything seed-specific arrives via ``resolved``; the function is otherwise
     identical to the legacy single-seed body. Shared mutable state
@@ -373,61 +425,17 @@ def _plan_matrix_for_seed(
     optimization_seed = resolved.optimization
     baseline_seed = resolved.ipi
 
-    for model_cfg_name in experiment.models:
-        model_cfg_name = str(model_cfg_name)
-        for direction in experiment.directions:
-            direction = str(direction)
-            for top_k_value in experiment.feature_counts:
-                top_k = int(top_k_value)
-                for n_trials in _trial_values_for_k(trial_grid, top_k):
-                    for scope in scopes:
-                        run_id = make_run_id(
-                            model_name=model_cfg_name,
-                            split_id=split_id,
-                            direction=direction,
-                            top_k=top_k,
-                            n_trials=n_trials,
-                            seed=optimization_seed,
-                            scope=scope,
-                            last_k=intervention_last_k,
-                        )
-                        manifest_path = output_root / run_id / "manifest.json"
-                        previous_manifest = _read_manifest(manifest_path)
-                        previous_status = (
-                            previous_manifest.get("status")
-                            if previous_manifest is not None
-                            else None
-                        )
-                        baseline_key = _baseline_reuse_key(
-                            model_cfg_name=model_cfg_name,
-                            split_id=split_id,
-                            seed=baseline_seed,
-                            cfg=cfg,
-                        )
-                        include_baseline_ipi = baseline_key not in scheduled_baseline_keys
-
-                        if _should_skip_existing(previous_status, resume, force, skip_existing):
-                            counters["skipped"] += 1
-                            print(f"\n[skip] {run_id} (already completed; resume/skip_existing active)")
-                            continue
-
-                        try:
-                            # Bare artifact names (no `:alias` suffix). Used both
-                            # as outputs (passed to scripts via artifacts.*) and,
-                            # with `:latest` appended, as inputs to downstream
-                            # stages.
-                            artifact_names = {
-                                "activations": make_activation_artifact_name(
-                                    model_name=model_cfg_name,
-                                    split_id=split_id,
-                                    layers=layers,
-                                ),
-                                "feature_ranking": make_feature_ranking_artifact_name(
-                                    model_name=model_cfg_name,
-                                    split_id=split_id,
-                                    ranking_top_n=ranking_top_n,
-                                ),
-                                "multipliers": make_multiplier_artifact_name(
+    for sae_width in sae_widths:
+        for bounds_multiplier in bounds_multipliers:
+            for model_cfg_name in experiment.models:
+                model_cfg_name = str(model_cfg_name)
+                for direction in experiment.directions:
+                    direction = str(direction)
+                    for top_k_value in experiment.feature_counts:
+                        top_k = int(top_k_value)
+                        for n_trials in _trial_values_for_k(trial_grid, top_k):
+                            for scope in scopes:
+                                run_id = make_run_id(
                                     model_name=model_cfg_name,
                                     split_id=split_id,
                                     direction=direction,
@@ -436,104 +444,164 @@ def _plan_matrix_for_seed(
                                     seed=optimization_seed,
                                     scope=scope,
                                     last_k=intervention_last_k,
-                                ),
-                                "ipi_baseline": make_ipi_artifact_name(
-                                    model_name=model_cfg_name,
-                                    split_id=split_id,
-                                    condition="baseline",
-                                    seed=baseline_seed,
-                                ),
-                                "ipi_intervened": make_ipi_artifact_name(
-                                    model_name=model_cfg_name,
-                                    split_id=split_id,
-                                    condition="intervened",
-                                    seed=optimization_seed,
-                                    direction=direction,
-                                    top_k=top_k,
-                                    n_trials=n_trials,
-                                    scope=scope,
-                                    last_k=intervention_last_k,
-                                ),
-                            }
-                            artifacts = {k: f"{v}:latest" for k, v in artifact_names.items()}
-                            commands = _build_commands(
-                                model_cfg_name=model_cfg_name,
-                                direction=direction,
-                                top_k=top_k,
-                                n_trials=n_trials,
-                                stages=experiment.stages,
-                                include_baseline_ipi=include_baseline_ipi,
-                                artifact_names=artifact_names,
-                                intervention_scope=scope,
-                                intervention_last_k=intervention_last_k,
-                                resolved=resolved,
-                                cfg=cfg,
-                            )
-                            manifest = {
-                                "run_id": run_id,
-                                "status": "planned",
-                                "model_name": model_cfg_name,
-                                "split_id": split_id,
-                                "direction": direction,
-                                "top_k": top_k,
-                                "n_trials": int(n_trials),
-                                "seed": optimization_seed,
-                                "seeds": resolved_seeds_to_dict(resolved),
-                                "intervention_scope": scope,
-                                "intervention_last_k": intervention_last_k,
-                                "commands": commands,
-                                "artifacts": artifacts,
-                                "metrics": _null_metrics(),
-                                "error": None,
-                            }
-                            _write_manifest(manifest_path, manifest)
-
-                            counters["planned"] += 1
-                            print(f"\n[{counters['planned']}] {run_id}")
-                            log_resolved_seeds(resolved, prefix=f"[plan] {run_id}")
-                            if previous_status and force:
-                                print(f"  forced replan over previous status={previous_status}")
-                            for cmd in commands:
-                                print(f"  - {cmd}")
-                            print(f"  manifest: {manifest_path}")
-                            if include_baseline_ipi and experiment.stages.get("ipi_baseline", False):
-                                scheduled_baseline_keys.add(baseline_key)
-                            else:
-                                print("  baseline IPI: reused (not rescheduled)")
-
-                            if not dry_run:
-                                _execute_job_commands(
-                                    commands=commands,
-                                    working_directory=project_root,
-                                    manifest_path=manifest_path,
-                                    manifest=manifest,
-                                    wandb_project=wandb_project,
-                                    wandb_entity=wandb_entity,
+                                    sae_width=sae_width,
+                                    bounds_multiplier=bounds_multiplier,
                                 )
-                                print("  execution: completed")
-                        except Exception as exc:
-                            counters["failed"] += 1
-                            failed_manifest = {
-                                "run_id": run_id,
-                                "status": "failed",
-                                "model_name": model_cfg_name,
-                                "split_id": split_id,
-                                "direction": direction,
-                                "top_k": top_k,
-                                "n_trials": int(n_trials),
-                                "seed": optimization_seed,
-                                "seeds": resolved_seeds_to_dict(resolved),
-                                "intervention_scope": scope,
-                                "intervention_last_k": intervention_last_k,
-                                "commands": [],
-                                "artifacts": {},
-                                "metrics": _null_metrics(),
-                                "error": str(exc),
-                            }
-                            _write_manifest(manifest_path, failed_manifest)
-                            print(f"\n[failed] {run_id}")
-                            print(f"  error: {exc}")
-                            print(f"  manifest: {manifest_path}")
+                                manifest_path = output_root / run_id / "manifest.json"
+                                previous_manifest = _read_manifest(manifest_path)
+                                previous_status = (
+                                    previous_manifest.get("status")
+                                    if previous_manifest is not None
+                                    else None
+                                )
+                                baseline_key = _baseline_reuse_key(
+                                    model_cfg_name=model_cfg_name,
+                                    split_id=split_id,
+                                    seed=baseline_seed,
+                                    cfg=cfg,
+                                )
+                                include_baseline_ipi = baseline_key not in scheduled_baseline_keys
+
+                                if _should_skip_existing(previous_status, resume, force, skip_existing):
+                                    counters["skipped"] += 1
+                                    print(f"\n[skip] {run_id} (already completed; resume/skip_existing active)")
+                                    continue
+
+                                try:
+                                    # Bare artifact names (no `:alias` suffix). Used both
+                                    # as outputs (passed to scripts via artifacts.*) and,
+                                    # with `:latest` appended, as inputs to downstream
+                                    # stages.
+                                    artifact_names = {
+                                        "activations": make_activation_artifact_name(
+                                            model_name=model_cfg_name,
+                                            split_id=split_id,
+                                            layers=layers,
+                                            sae_width=sae_width,
+                                        ),
+                                        "feature_ranking": make_feature_ranking_artifact_name(
+                                            model_name=model_cfg_name,
+                                            split_id=split_id,
+                                            ranking_top_n=ranking_top_n,
+                                            sae_width=sae_width,
+                                        ),
+                                        "multipliers": make_multiplier_artifact_name(
+                                            model_name=model_cfg_name,
+                                            split_id=split_id,
+                                            direction=direction,
+                                            top_k=top_k,
+                                            n_trials=n_trials,
+                                            seed=optimization_seed,
+                                            scope=scope,
+                                            last_k=intervention_last_k,
+                                            sae_width=sae_width,
+                                            bounds_multiplier=bounds_multiplier,
+                                        ),
+                                        "ipi_baseline": make_ipi_artifact_name(
+                                            model_name=model_cfg_name,
+                                            split_id=split_id,
+                                            condition="baseline",
+                                            seed=baseline_seed,
+                                        ),
+                                        "ipi_intervened": make_ipi_artifact_name(
+                                            model_name=model_cfg_name,
+                                            split_id=split_id,
+                                            condition="intervened",
+                                            seed=optimization_seed,
+                                            direction=direction,
+                                            top_k=top_k,
+                                            n_trials=n_trials,
+                                            scope=scope,
+                                            last_k=intervention_last_k,
+                                            sae_width=sae_width,
+                                            bounds_multiplier=bounds_multiplier,
+                                        ),
+                                    }
+                                    artifacts = {k: f"{v}:latest" for k, v in artifact_names.items()}
+                                    commands = _build_commands(
+                                        model_cfg_name=model_cfg_name,
+                                        direction=direction,
+                                        top_k=top_k,
+                                        n_trials=n_trials,
+                                        stages=experiment.stages,
+                                        include_baseline_ipi=include_baseline_ipi,
+                                        artifact_names=artifact_names,
+                                        intervention_scope=scope,
+                                        intervention_last_k=intervention_last_k,
+                                        sae_width=sae_width,
+                                        bounds_multiplier=bounds_multiplier,
+                                        resolved=resolved,
+                                        cfg=cfg,
+                                    )
+                                    manifest = {
+                                        "run_id": run_id,
+                                        "status": "planned",
+                                        "model_name": model_cfg_name,
+                                        "split_id": split_id,
+                                        "direction": direction,
+                                        "top_k": top_k,
+                                        "n_trials": int(n_trials),
+                                        "seed": optimization_seed,
+                                        "seeds": resolved_seeds_to_dict(resolved),
+                                        "sae_width": sae_width,
+                                        "bounds_multiplier": bounds_multiplier,
+                                        "intervention_scope": scope,
+                                        "intervention_last_k": intervention_last_k,
+                                        "commands": commands,
+                                        "artifacts": artifacts,
+                                        "metrics": _null_metrics(),
+                                        "error": None,
+                                    }
+                                    _write_manifest(manifest_path, manifest)
+
+                                    counters["planned"] += 1
+                                    print(f"\n[{counters['planned']}] {run_id}")
+                                    log_resolved_seeds(resolved, prefix=f"[plan] {run_id}")
+                                    if previous_status and force:
+                                        print(f"  forced replan over previous status={previous_status}")
+                                    for cmd in commands:
+                                        print(f"  - {cmd}")
+                                    print(f"  manifest: {manifest_path}")
+                                    if include_baseline_ipi and experiment.stages.get("ipi_baseline", False):
+                                        scheduled_baseline_keys.add(baseline_key)
+                                    else:
+                                        print("  baseline IPI: reused (not rescheduled)")
+
+                                    if not dry_run:
+                                        _execute_job_commands(
+                                            commands=commands,
+                                            working_directory=project_root,
+                                            manifest_path=manifest_path,
+                                            manifest=manifest,
+                                            wandb_project=wandb_project,
+                                            wandb_entity=wandb_entity,
+                                        )
+                                        print("  execution: completed")
+                                except Exception as exc:
+                                    counters["failed"] += 1
+                                    failed_manifest = {
+                                        "run_id": run_id,
+                                        "status": "failed",
+                                        "model_name": model_cfg_name,
+                                        "split_id": split_id,
+                                        "direction": direction,
+                                        "top_k": top_k,
+                                        "n_trials": int(n_trials),
+                                        "seed": optimization_seed,
+                                        "seeds": resolved_seeds_to_dict(resolved),
+                                        "sae_width": sae_width,
+                                        "bounds_multiplier": bounds_multiplier,
+                                        "intervention_scope": scope,
+                                        "intervention_last_k": intervention_last_k,
+                                        "commands": [],
+                                        "artifacts": {},
+                                        "metrics": _null_metrics(),
+                                        "error": str(exc),
+                                    }
+                                    _write_manifest(manifest_path, failed_manifest)
+                                    print(f"\n[failed] {run_id}")
+                                    print(f"  error: {exc}")
+                                    print(f"  manifest: {manifest_path}")
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
@@ -552,9 +620,12 @@ def main(cfg: DictConfig) -> None:
     if not data_cfg.get("validation_dataset"):
         raise ValueError("data.validation_dataset must be set for pipeline planning.")
     ranking_top_n = int(cfg.feature_selection.get("ranking_top_n", 256))
-    extraction_cfg = cfg.get("extraction", {})
+    extraction_cfg = cfg.get("extraction", {}) or {}
     layers_cfg = extraction_cfg.get("layers", "all")
     layers = format_layers_slug(layers_cfg)
+    optimization_cfg = cfg.get("optimization", {}) or {}
+    sae_widths = _resolve_sae_widths(experiment, extraction_cfg)
+    bounds_multipliers = _resolve_bounds_multipliers(experiment, optimization_cfg)
 
     # Intervention scope axis. Missing `scopes` field means single-scope sweep
     # at the legacy default, which keeps existing experiment yamls
@@ -592,6 +663,11 @@ def main(cfg: DictConfig) -> None:
     print(f"PIPELINE PLAN: {experiment.name}")
     print(f"runs_subdir={runs_subdir} (manifests under {output_root}/)")
     print(f"seed sweep: {seed_sweep_display}")
+    print(f"sae_width sweep: {', '.join(sae_widths)}")
+    print(
+        "bounds_multiplier sweep: "
+        + ", ".join(str(value) for value in bounds_multipliers)
+    )
     print(f"dry_run={dry_run}")
     print(f"resume={cfg.pipeline.get('resume', True)} force={cfg.pipeline.get('force', False)}")
     print(f"skip_existing={cfg.pipeline.get('skip_existing', True)}")
@@ -621,6 +697,8 @@ def main(cfg: DictConfig) -> None:
             intervention_last_k=intervention_last_k,
             ranking_top_n=ranking_top_n,
             layers=layers,
+            sae_widths=sae_widths,
+            bounds_multipliers=bounds_multipliers,
             trial_grid=trial_grid,
             output_root=output_root,
             dry_run=dry_run,

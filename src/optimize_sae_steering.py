@@ -1264,6 +1264,8 @@ def main(cfg: DictConfig):
         else:
             model_name_for_artifact = hydra_cfg.runtime.choices.get("model")
             if split_id and model_name_for_artifact:
+                extraction_cfg = cfg.get("extraction", {}) or {}
+                opt_cfg = cfg.get("optimization", {}) or {}
                 multipliers_artifact_name = make_multiplier_artifact_name(
                     model_name=str(model_name_for_artifact),
                     split_id=str(split_id),
@@ -1273,6 +1275,10 @@ def main(cfg: DictConfig):
                     seed=seed,
                     scope=intervention_scope,
                     last_k=intervention_last_k,
+                    sae_width=str(extraction_cfg.get("sae_width", "65k")),
+                    bounds_multiplier=float(
+                        opt_cfg.get("bounds_multiplier", DEFAULT_BOUNDS_MULTIPLIER)
+                    ),
                 )
             else:
                 # Legacy ad-hoc fallback when split/model slugs are unavailable.

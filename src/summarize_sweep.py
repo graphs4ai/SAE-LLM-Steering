@@ -19,6 +19,8 @@ SUMMARY_COLUMNS = [
     "top_k",
     "n_trials",
     "seed",
+    "sae_width",
+    "bounds_multiplier",
     "intervention_scope",
     "intervention_last_k",
     "activation_artifact",
@@ -49,6 +51,8 @@ SUMMARY_COLUMNS = [
 # `src/utils/intervention_hooks.py`.
 _LEGACY_DEFAULT_SCOPE = "prompt_without_buffer"
 _LEGACY_DEFAULT_LAST_K = 3
+_LEGACY_DEFAULT_SAE_WIDTH = "65k"
+_LEGACY_DEFAULT_BOUNDS_MULTIPLIER = 3.0
 
 
 def _format_cell(value: Any) -> str:
@@ -66,6 +70,10 @@ def _flatten_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     intervention_last_k = manifest.get("intervention_last_k")
     if intervention_last_k is None:
         intervention_last_k = _LEGACY_DEFAULT_LAST_K
+    sae_width = manifest.get("sae_width") or _LEGACY_DEFAULT_SAE_WIDTH
+    bounds_multiplier = manifest.get("bounds_multiplier")
+    if bounds_multiplier is None:
+        bounds_multiplier = _LEGACY_DEFAULT_BOUNDS_MULTIPLIER
     return {
         "run_id": manifest.get("run_id"),
         "model_name": manifest.get("model_name"),
@@ -74,6 +82,8 @@ def _flatten_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "top_k": manifest.get("top_k"),
         "n_trials": manifest.get("n_trials"),
         "seed": manifest.get("seed"),
+        "sae_width": sae_width,
+        "bounds_multiplier": bounds_multiplier,
         "intervention_scope": intervention_scope,
         "intervention_last_k": intervention_last_k,
         "activation_artifact": artifacts.get("activations"),
