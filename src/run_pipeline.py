@@ -256,6 +256,14 @@ def _should_skip_existing(previous_status: str | None, resume: bool, force: bool
     return resume or skip_existing
 
 
+def _should_preserve_existing_manifest(
+    previous_status: str | None,
+    dry_run: bool,
+) -> bool:
+    """Dry-run must never downgrade a completed manifest to planned."""
+    return dry_run and previous_status == "completed"
+
+
 def _execute_job_commands(
     commands: list[str],
     working_directory: Path,
@@ -552,6 +560,29 @@ def _plan_matrix_for_seed(
                                         "metrics": _null_metrics(),
                                         "error": None,
                                     }
+
+                                    if _should_preserve_existing_manifest(previous_status, dry_run):
+                                        counters["preserved"] += 1
+                                        label = (
+                                            "[dry-run force preserve]"
+                                            if force
+                                            else "[dry-run preserve]"
+                                        )
+                                        print(f"\n{label} {run_id} (manifest not overwritten)")
+                                        log_resolved_seeds(resolved, prefix=f"[plan] {run_id}")
+                                        if force:
+                                            print(
+                                                f"  would force rerun over previous status={previous_status}"
+                                            )
+                                        for cmd in commands:
+                                            print(f"  - {cmd}")
+                                        print(f"  manifest: {manifest_path} (unchanged)")
+                                        if include_baseline_ipi and experiment.stages.get("ipi_baseline", False):
+                                            scheduled_baseline_keys.add(baseline_key)
+                                        else:
+                                            print("  baseline IPI: reused (not rescheduled)")
+                                        continue
+
                                     _write_manifest(manifest_path, manifest)
 
                                     counters["planned"] += 1
@@ -674,7 +705,7 @@ def main(cfg: DictConfig) -> None:
     print("=" * 70)
 
     trial_grid = dict(experiment.trial_grid)
-    counters: dict[str, int] = {"planned": 0, "skipped": 0, "failed": 0}
+    counters: dict[str, int] = {"planned": 0, "skipped": 0, "failed": 0, "preserved": 0}
     resume = bool(cfg.pipeline.get("resume", True))
     force = bool(cfg.pipeline.get("force", False))
     skip_existing = bool(cfg.pipeline.get("skip_existing", True))
@@ -715,6 +746,7 @@ def main(cfg: DictConfig) -> None:
     print("\n" + "=" * 70)
     print(f"Planned jobs: {counters['planned']}")
     print(f"Skipped jobs: {counters['skipped']}")
+    print(f"Preserved jobs: {counters['preserved']}")
     print(f"Failed jobs: {counters['failed']}")
     print(f"Manifests written under: {output_root}")
     print("=" * 70)
