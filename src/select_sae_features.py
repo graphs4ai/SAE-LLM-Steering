@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 from typing import Any
 
 import hydra
@@ -28,6 +29,31 @@ def _parse_feature_column(column: str) -> tuple[int, int] | None:
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
+
+
+def _parquet_thrift_size_limit(parquet_path: str) -> int:
+    """Return Thrift decode limits large enough for very wide SAE parquet footers.
+
+    Wide activations tables (e.g. 2 x 262k SAE latents) store one parquet column
+    per latent. The serialized schema in the file footer can exceed PyArrow's
+    default Thrift string/container limits (~100 MiB).
+    """
+    with open(parquet_path, "rb") as f:
+        f.seek(-8, 2)
+        footer_len = struct.unpack("<i", f.read(4))[0]
+    if footer_len <= 0:
+        raise ValueError(f"Invalid parquet footer length in {parquet_path}")
+    # Footer size tracks per-column schema metadata; double it for container overhead.
+    return max(64 * 1024 * 1024, footer_len * 2)
+
+
+def _open_activations_parquet(parquet_path: str) -> pq.ParquetFile:
+    thrift_limit = _parquet_thrift_size_limit(parquet_path)
+    return pq.ParquetFile(
+        parquet_path,
+        thrift_string_size_limit=thrift_limit,
+        thrift_container_size_limit=thrift_limit,
+    )
 
 
 def _default_column_chunk_size(n_rows: int | None, n_cols: int) -> int:
@@ -53,7 +79,7 @@ def _score_mean_activation_chunked(
     each column chunk is much faster than per-column Python loops with small
     chunks.
     """
-    pf = pq.ParquetFile(parquet_path)
+    pf = _open_activations_parquet(parquet_path)
     n_rows = pf.metadata.num_rows if pf.metadata is not None else None
     if n_rows == 0:
         raise ValueError(f"Activations parquet is empty: {parquet_path}")
@@ -93,7 +119,7 @@ def _score_paired_contrastive_chunked(
     min_active_rate: float = 0.0,
 ) -> dict[str, dict[str, float]]:
     """Score features by paired left/right activation contrast."""
-    pf = pq.ParquetFile(parquet_path)
+    pf = _open_activations_parquet(parquet_path)
     n_rows = pf.metadata.num_rows if pf.metadata is not None else None
     if n_rows == 0:
         raise ValueError(f"Activations parquet is empty: {parquet_path}")
@@ -257,9 +283,9 @@ def main(cfg: DictConfig) -> None:
     parquet_path = _find_parquet(artifact_dir)
     print(f"Using activations parquet: {parquet_path}")
 
-    schema = pq.read_schema(parquet_path)
+    pf = _open_activations_parquet(parquet_path)
     feature_columns = [
-        name for name in schema.names if _parse_feature_column(name) is not None
+        name for name in pf.schema.names if _parse_feature_column(name) is not None
     ]
     if not feature_columns:
         raise ValueError(
