@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 from sae_lens import SAE
 from sae_lens.analysis.sae_transformer_bridge import SAETransformerBridge
 
+from utils.hf_sae_shapes import install_local_safetensors_shape_patch
 from utils.intervention_hooks import (
     DEFAULT_LAST_K,
     DEFAULT_SCOPE,
@@ -16,6 +17,9 @@ from utils.intervention_hooks import (
 )
 from utils.sae_steering import build_normalized_steering_vector, latent_clamp_delta
 
+
+# Prefer local HF cache for sae_lens safetensors header probes (Xet CDN 403).
+install_local_safetensors_shape_patch()
 
 # Gemma Scope 2 resid_post SAEs are only published for these layers.
 ALLOWED_SAE_LAYERS: tuple[int, ...] = (9, 17, 22, 29)
