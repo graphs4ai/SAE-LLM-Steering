@@ -1,19 +1,24 @@
 # @package _global_
 
 model:
-  name: "google/gemma-3-4b-it"
+  name: "google/gemma-3-27b-it"
   wrapper: "gemma"
-  n_devices: 1  # Number of GPUs (increase if model doesn't fit on one GPU)
+  # Gemma3Wrapper currently loads via SAETransformerBridge on a single device.
+  # Prefer a GPU with enough VRAM for bf16 (~54GB+) or reduce batch sizes below.
+  n_devices: 1
   dtype: "bfloat16"  # "float16" or "bfloat16"
 
 extraction:
-  batch_size: 8
-  # Subset of Gemma Scope 2 resid_post layers {9, 17, 22, 29}; "all" = all four.
-  # layers: [9, 17, 22, 29]
-  layers: [17, 22]
+  batch_size: 2
+  # Gemma Scope 2 resid_post layers {16, 31, 40, 53}; "all" = all four.
+  # Analogous mid-depth pair to gemma-3-4b's [17, 22].
+  # layers: [16, 31, 40, 53]
+  layers: [31, 40]
   device: "cuda"
   max_length: 1024
-  sae_release: "gemma-scope-2-4b-it-res"
+  sae_width: "65k"
+  sae_l0: "medium"
+  sae_release: "gemma-scope-2-27b-it-res"
 
 ipi:
   use_chat_format: True
@@ -25,7 +30,7 @@ optimization:
   n_startup_trials: 100
   n_trials: 3000
 
-  study_name: "gemma-3-4b-pi-optimization"
+  study_name: "gemma-3-27b-pi-optimization"
   storage: null
   load_if_exists: true
 
@@ -55,7 +60,7 @@ poeta:
 
   # Device and batch settings for PoETa
   device: "cuda"
-  batch_size: 2
+  batch_size: 1
 
   # Whether to run comparison mode (evaluates both baseline and intervened)
   compare_baseline: true  # Changed to true to automatically measure if the intervention degraded general capabilities

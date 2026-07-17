@@ -21,11 +21,36 @@ from utils.sae_steering import build_normalized_steering_vector, latent_clamp_de
 # Prefer local HF cache for sae_lens safetensors header probes (Xet CDN 403).
 install_local_safetensors_shape_patch()
 
-# Gemma Scope 2 resid_post SAEs are only published for these layers.
-ALLOWED_SAE_LAYERS: tuple[int, ...] = (9, 17, 22, 29)
+# Gemma Scope 2 resid_post SAEs (4-layer subset) for gemma-3-4b-it.
+# Other releases (e.g. 27b) resolve allowed layers from sae_lens at init time.
+DEFAULT_ALLOWED_SAE_LAYERS: tuple[int, ...] = (9, 17, 22, 29)
+ALLOWED_SAE_LAYERS = DEFAULT_ALLOWED_SAE_LAYERS  # backward-compatible alias
 DEFAULT_SAE_WIDTH = "65k"
 DEFAULT_SAE_L0 = "medium"
 DEFAULT_SAE_RELEASE = "gemma-scope-2-4b-it-res"
+
+
+def infer_allowed_sae_layers(release: str) -> tuple[int, ...]:
+    """Return resid_post SAE layer indices available for ``release``."""
+    try:
+        from sae_lens.loading.pretrained_saes_directory import (
+            get_pretrained_saes_directory,
+        )
+
+        directory = get_pretrained_saes_directory()
+        info = directory.get(release)
+        if info is None:
+            return DEFAULT_ALLOWED_SAE_LAYERS
+        layers = sorted(
+            {
+                int(sae_id.split("_")[1])
+                for sae_id in info.saes_map
+                if sae_id.startswith("layer_") and "_width_" in sae_id
+            }
+        )
+        return tuple(layers) if layers else DEFAULT_ALLOWED_SAE_LAYERS
+    except Exception:
+        return DEFAULT_ALLOWED_SAE_LAYERS
 INTERVENTION_MODE = "sae_decoded_delta_additive"
 DEFAULT_DECODER_NORMALIZATION = "raw"
 
@@ -65,9 +90,10 @@ class Gemma3Wrapper:
     """
     Wrapper for Gemma-3 models using SAETransformerBridge + Gemma Scope 2 SAEs.
 
-    Extracts SAE latent features at resid_post for layers in
-    ``ALLOWED_SAE_LAYERS``. Two intervention mechanisms are supported (see
-    ``edit_mode``), both applied on resid_post / hook_out:
+    Extracts SAE latent features at resid_post for layers in the release's
+    4-layer subset (inferred via ``infer_allowed_sae_layers``). Two
+    intervention mechanisms are supported (see ``edit_mode``), both applied
+    on resid_post / hook_out:
 
     - ``decoder_delta_additive`` (default): static per-layer vector
       ``x' = x + sum_j alpha_j * W_dec[j]``, identical at every masked
@@ -94,9 +120,9 @@ class Gemma3Wrapper:
             device: "cuda" or "cpu"
             dtype: torch.bfloat16 recommended for Gemma Scope 2
             n_devices: Ignored; SAETransformerBridge path is single-device.
-            sae_layers: Layers to load SAEs for (subset of ALLOWED_SAE_LAYERS,
-                        or "all"). If None, SAEs are loaded lazily on first
-                        ``get_layer_activations`` call.
+            sae_layers: Layers to load SAEs for (subset of the release's
+                        allowed SAE layers, or "all"). If None, SAEs are
+                        loaded lazily on first ``get_layer_activations`` call.
             sae_width: SAE width id (e.g. "65k")
             sae_l0: SAE L0 id (e.g. "medium")
             sae_release: HuggingFace SAE release name
@@ -113,6 +139,7 @@ class Gemma3Wrapper:
         self.sae_width = sae_width
         self.sae_l0 = sae_l0
         self.sae_release = sae_release
+        self.allowed_sae_layers = infer_allowed_sae_layers(sae_release)
 
         self.model = SAETransformerBridge.boot_transformers(
             model_name,
@@ -152,21 +179,22 @@ class Gemma3Wrapper:
     def resolve_sae_layers(
         self, layers: Union[List[int], str]
     ) -> List[int]:
-        """Expand and validate SAE layer indices against ALLOWED_SAE_LAYERS."""
+        """Expand and validate SAE layer indices against allowed SAE layers."""
+        allowed = self.allowed_sae_layers
         if isinstance(layers, str):
             if layers.lower() == "all":
-                return list(ALLOWED_SAE_LAYERS)
+                return list(allowed)
             raise ValueError("layers must be a list or 'all'")
 
         if not layers:
             raise ValueError("layers list cannot be empty")
 
         resolved = [int(layer) for layer in layers]
-        invalid = [layer for layer in resolved if layer not in ALLOWED_SAE_LAYERS]
+        invalid = [layer for layer in resolved if layer not in allowed]
         if invalid:
             raise ValueError(
                 f"Unsupported SAE layers: {invalid}. "
-                f"Allowed: {list(ALLOWED_SAE_LAYERS)}"
+                f"Allowed for {self.sae_release!r}: {list(allowed)}"
             )
         return resolved
 
@@ -190,7 +218,9 @@ class Gemma3Wrapper:
         release = release or self.sae_release
         self.sae_width = width
         self.sae_l0 = l0
-        self.sae_release = release
+        if release != self.sae_release:
+            self.sae_release = release
+            self.allowed_sae_layers = infer_allowed_sae_layers(release)
 
         resolved_layers = self.resolve_sae_layers(layers)
         sae_device = self.input_device
@@ -228,10 +258,11 @@ class Gemma3Wrapper:
         layer_feature_alphas: Dict[int, Dict[int, float]] = {}
         for name, alpha in activation_multipliers.items():
             layer, feature = parse_feature_coefficient_name(name)
-            if layer not in ALLOWED_SAE_LAYERS:
+            if layer not in self.allowed_sae_layers:
                 raise ValueError(
                     f"Feature {name!r} uses unsupported SAE layer {layer}. "
-                    f"Allowed: {list(ALLOWED_SAE_LAYERS)}"
+                    f"Allowed for {self.sae_release!r}: "
+                    f"{list(self.allowed_sae_layers)}"
                 )
             layer_feature_alphas.setdefault(layer, {})[feature] = float(alpha)
         return layer_feature_alphas

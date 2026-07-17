@@ -22,11 +22,15 @@ See `notebooks/gemma_scope2_playground.ipynb` for an interactive Gemma Scope 2 s
 uv sync
 huggingface-cli login  # gated Gemma weights
 
-# Dry-run the full sweep matrix
+# Dry-run the full sweep matrix (4b)
 uv run python src/run_pipeline.py experiment=gemma_scope pipeline.dry_run=true
+
+# Dry-run Gemma-3-27B (Gemma Scope 2 layers 31+40)
+uv run python src/run_pipeline.py experiment=gemma_scope_27b pipeline.dry_run=true
 
 # Individual stages
 uv run python src/extract_activations.py model=gemma-3-4b
+uv run python src/extract_activations.py model=gemma-3-27b
 uv run python src/select_sae_features.py model=gemma-3-4b artifacts.activations=...
 uv run python src/optimize_sae_steering.py model=gemma-3-4b artifacts.feature_ranking=...
 uv run python src/ipi_eval.py model=gemma-3-4b ipi.condition=baseline
