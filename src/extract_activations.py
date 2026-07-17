@@ -4,14 +4,21 @@ from tqdm import tqdm
 from model_factory import get_model_wrapper
 from activation_df import ActivationDataFrame
 import os
+import tempfile
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
-import wandb
 
 from utils.ipi_prompts import build_ipi_chat_prompt
 from utils.ipi_surrogate import resolve_option_scores
 from utils.experiment_ids import format_layers_slug
+from utils.local_artifacts import (
+    artifact_exists,
+    normalize_artifact_name,
+    resolve_artifacts_root,
+    should_force,
+    write_artifact,
+)
 
 
 def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
@@ -54,36 +61,7 @@ def main(cfg: DictConfig):
     hydra_cfg = HydraConfig.get()
     run_dir = hydra_cfg.runtime.output_dir
 
-    # W&B configuration
-    wandb_cfg = cfg.get('wandb', {})
-
-    # Resolve input path: prefer W&B artifact if provided
-    dataset_artifact_name = cfg.data.get('dataset_artifact_name', None)
-    wandb_config = OmegaConf.to_container(cfg, resolve=True)
-    if isinstance(wandb_config, dict):
-        wandb_config["resolved_seeds"] = resolved_seeds_to_dict(resolved)
-    if dataset_artifact_name:
-        # Initialize W&B early to download artifact
-        wandb.init(
-            project=wandb_cfg.get('project', 'activation-bias-classifier'),
-            name=wandb_cfg.get('run_name', None),
-            job_type="extraction",
-            config=wandb_config,
-        )
-        print(f"Downloading dataset artifact: {dataset_artifact_name}")
-        artifact = wandb.use_artifact(dataset_artifact_name, type='dataset')
-        artifact_dir = artifact.download()
-        # Find CSV file in artifact
-        csv_files = [f for f in os.listdir(artifact_dir) if f.endswith('.csv')]
-        if not csv_files:
-            raise ValueError(
-                f"No CSV file found in artifact {dataset_artifact_name}")
-        input_path = os.path.join(artifact_dir, csv_files[0])
-        print(f"Using dataset from artifact: {input_path}")
-        wandb_initialized = True
-    else:
-        input_path = hydra.utils.to_absolute_path(cfg.data.feature_selection_dataset)
-        wandb_initialized = False
+    input_path = hydra.utils.to_absolute_path(cfg.data.feature_selection_dataset)
 
     # Determine artifact name based on dataset and model
     dataset_name = os.path.basename(input_path).replace(
@@ -96,49 +74,30 @@ def main(cfg: DictConfig):
     # so a sweep can pin a deterministic identity (see src/utils/experiment_ids.py).
     artifacts_cfg = cfg.get('artifacts', {}) or {}
     override_name = artifacts_cfg.get('activations', None)
-    artifact_name = (
+    artifact_name = normalize_artifact_name(
         str(override_name)
         if override_name
         else f"activations-{dataset_name}-{model_name}-{layers_str}"
     )
-    output_path = f"data/{artifact_name}.parquet"
+    force = should_force(cfg)
+    project_root = hydra.utils.get_original_cwd()
+    artifacts_root = resolve_artifacts_root(cfg=cfg, project_root=project_root)
 
-    # Initialize W&B with job_type="extraction" (if not already initialized for artifact download)
-    if not wandb_initialized:
-        wandb.init(
-            project=wandb_cfg.get('project', 'activation-bias-classifier'),
-            name=wandb_cfg.get('run_name', None),
-            job_type="extraction",
+    if (
+        not force
+        and artifact_exists(
+            artifact_name,
+            required_files=["activations.parquet"],
+            root=artifacts_root,
         )
+    ):
+        print(
+            f"[skip] activations artifact already exists: {artifact_name} "
+            f"(under {artifacts_root})"
+        )
+        return
 
-    # Update W&B config
-    wandb_run_config = {
-        'feature_selection_dataset': input_path,
-        'dataset_artifact': dataset_artifact_name,
-        'output_file': output_path,
-        'batch_size': batch_size,
-        'device': device,
-        'layers': layers_str,
-        'max_length': cfg.extraction.max_length,
-        'model_name': cfg.model.name,
-        'model_wrapper': cfg.model.wrapper,
-        'extraction_seed': resolved.extraction,
-        'resolved_seeds': resolved_seeds_to_dict(resolved),
-        'prompt_mode': prompt_mode,
-    }
-    if cfg.model.wrapper == "gemma":
-        wandb_run_config.update({
-            'sae_width': cfg.extraction.get('sae_width', '65k'),
-            'sae_l0': cfg.extraction.get('sae_l0', 'medium'),
-            'sae_release': cfg.extraction.get(
-                'sae_release', 'gemma-scope-2-4b-it-res'),
-            'hook': 'resid_post',
-        })
-    wandb.config.update(wandb_run_config)
-
-    # 1. Load Data
     print(f"Loading data from {input_path}...")
-    # For demonstration, creating a dummy dataframe if file doesn't exist
     if not os.path.exists(input_path):
         print("Input file not found. Creating dummy data for demonstration.")
         df = pd.DataFrame({
@@ -147,14 +106,12 @@ def main(cfg: DictConfig):
         })
     else:
         df = pd.read_csv(input_path)
-        # Ensure columns exist
         if 'statement' not in df.columns or 'pol_label_human' not in df.columns:
             raise ValueError(
                 "Input DataFrame must contain 'statement' and 'pol_label_human' columns.")
 
     print(f"Loaded {len(df)} samples.")
 
-    # 2. Initialize Model using factory
     print(f"Initializing model...")
     wrapper = get_model_wrapper(cfg)
     if wrapper.model.tokenizer is None:
@@ -162,13 +119,11 @@ def main(cfg: DictConfig):
     loaded_name = getattr(wrapper.model.cfg, "model_name", None) or cfg.model.name
     print(f"Loaded model: {loaded_name}")
 
-    # Ensure tokenizer has a pad token
     if wrapper.model.tokenizer.pad_token is None:
         wrapper.model.tokenizer.pad_token = wrapper.model.tokenizer.eos_token
 
     option_scores = resolve_option_scores(cfg)
 
-    # Resolve layers list (handle 'all' option). Gemma uses SAE-allowed layers.
     layers_cfg = cfg.extraction.layers
     is_gemma_sae = hasattr(wrapper, "resolve_sae_layers")
     if is_gemma_sae:
@@ -181,13 +136,10 @@ def main(cfg: DictConfig):
         layers = list(layers_cfg)
         d_features = wrapper.model.cfg.d_model
 
-    # 3. Initialize Accumulator with layer info
     activation_df = ActivationDataFrame(layers=layers, d_features=d_features)
 
-    # 4. Processing Loop
     print("Starting extraction loop...")
 
-    # Create batches
     total_samples = len(df)
 
     for start_idx in tqdm(range(0, total_samples, batch_size), desc="Processing Batches"):
@@ -219,7 +171,6 @@ def main(cfg: DictConfig):
                 "Expected 'ipi_chat' or 'bare_statement'."
             )
 
-        # Tokenize
         encoding = wrapper.model.tokenizer(
             texts,
             return_tensors='pt',
@@ -232,8 +183,6 @@ def main(cfg: DictConfig):
         attention_mask = encoding['attention_mask']
 
         try:
-            # Wrapper handles device placement internally;
-            # activations are returned on CPU (hooks use .detach().cpu())
             layer_activations = wrapper.get_layer_activations(
                 input_ids, layers=layers)
         except Exception as e:
@@ -245,14 +194,12 @@ def main(cfg: DictConfig):
         batch_indices = torch.arange(input_ids.shape[0])
 
         if padding_side == 'left':
-            last_token_indices = -1
             final_activations = layer_activations[:, -1, :]
         else:
             last_token_indices = attention_mask.sum(dim=1).long() - 1
             final_activations = layer_activations[batch_indices,
                                                   last_token_indices, :]
 
-        # Add to accumulator
         activation_df.add_batch(
             final_activations,
             labels,
@@ -263,64 +210,46 @@ def main(cfg: DictConfig):
             },
         )
 
-    # 5. Save Results
-    print(f"Saving results to {output_path}...")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    activation_df.save(output_path)
-    full_output_path = os.path.join(os.getcwd(), output_path)
-    print(f"Done. Saved to {full_output_path}")
+    with tempfile.TemporaryDirectory(dir=run_dir) as tmp_dir:
+        tmp_parquet = os.path.join(tmp_dir, "activations.parquet")
+        print(f"Saving results to {tmp_parquet}...")
+        activation_df.save(tmp_parquet)
 
-    # --- ARTIFACT: Log activations as versioned dataset artifact ---
+        artifact_metadata = {
+            'model_name': cfg.model.name,
+            'model_wrapper': cfg.model.wrapper,
+            'feature_selection_dataset': input_path,
+            'n_samples': total_samples,
+            'n_layers': len(layers),
+            'layers': layers,
+            'd_features': d_features,
+            'batch_size': batch_size,
+            'max_length': cfg.extraction.max_length,
+            'prompt_mode': prompt_mode,
+            'token_position': 'last_prompt',
+            'extraction_seed': resolved.extraction,
+            'resolved_seeds': resolved_seeds_to_dict(resolved),
+            'n_features': len(layers) * d_features,
+        }
+        if is_gemma_sae:
+            artifact_metadata.update({
+                'd_sae': d_features,
+                'sae_width': getattr(wrapper, 'sae_width', None),
+                'sae_l0': getattr(wrapper, 'sae_l0', None),
+                'sae_release': getattr(wrapper, 'sae_release', None),
+                'hook': 'resid_post',
+            })
+        else:
+            artifact_metadata['d_model'] = d_features
 
-    artifact_metadata = {
-        'model_name': cfg.model.name,
-        'model_wrapper': cfg.model.wrapper,
-        'feature_selection_dataset': input_path,
-        'n_samples': total_samples,
-        'n_layers': len(layers),
-        'layers': layers,
-        'd_features': d_features,
-        'batch_size': batch_size,
-        'max_length': cfg.extraction.max_length,
-        'prompt_mode': prompt_mode,
-        'token_position': 'last_prompt',
-    }
-    if is_gemma_sae:
-        artifact_metadata.update({
-            'd_sae': d_features,
-            'sae_width': getattr(wrapper, 'sae_width', None),
-            'sae_l0': getattr(wrapper, 'sae_l0', None),
-            'sae_release': getattr(wrapper, 'sae_release', None),
-            'hook': 'resid_post',
-        })
-    else:
-        artifact_metadata['d_model'] = d_features
-
-    activations_artifact = wandb.Artifact(
-        name=artifact_name,
-        type="dataset",
-        description=f"Extracted activations from {cfg.model.name} on {dataset_name} dataset",
-        metadata=artifact_metadata,
-    )
-    activations_artifact.add_file(full_output_path)
-    wandb.log_artifact(activations_artifact)
-    print(f"Activations artifact logged: {artifact_name}")
-
-    # Log summary metrics
-    summary = {
-        'n_samples': total_samples,
-        'n_layers': len(layers),
-        'd_features': d_features,
-        'n_features': len(layers) * d_features,
-    }
-    if is_gemma_sae:
-        summary['d_sae'] = d_features
-    else:
-        summary['d_model'] = d_features
-    wandb.summary.update(summary)
-
-    # Finish W&B run
-    wandb.finish()
+        artifact_path = write_artifact(
+            artifact_name,
+            {"activations.parquet": tmp_parquet},
+            artifact_metadata,
+            root=artifacts_root,
+            force=force,
+        )
+        print(f"Activations artifact written: {artifact_path}")
 
 
 if __name__ == "__main__":

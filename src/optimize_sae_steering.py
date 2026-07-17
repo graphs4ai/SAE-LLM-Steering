@@ -11,7 +11,6 @@ import os
 import sys
 import json
 from datetime import datetime
-import wandb
 
 from model_factory import get_model_wrapper
 from ipi_eval import (
@@ -21,7 +20,6 @@ from ipi_eval import (
 from utils.ipi_prompts import create_ipi_prompt, format_chat_prompt
 from utils.ipi_surrogate import (
     discover_option_token_ids,
-    flush_option_scores_wandb_log,
     resolve_option_mapping_seed,
     resolve_option_scores,
     seed_dependent_option_scores_enabled,
@@ -31,6 +29,13 @@ from utils.intervention_hooks import (
     DEFAULT_LAST_K,
     DEFAULT_SCOPE,
     assert_scope,
+)
+from utils.local_artifacts import (
+    normalize_artifact_name,
+    resolve_artifacts_root,
+    resolve_path,
+    should_force,
+    write_artifact,
 )
 from utils.sae_steering import compute_latent_clamp_bounds
 
@@ -768,8 +773,6 @@ def main(cfg: DictConfig):
         fast_sample_seed = resolved.optimization_fast_sample
         split_seed = resolved.optimization_split
 
-        # W&B configuration
-        wandb_cfg = cfg.get('wandb', {})
         feature_artifact_name = artifacts_cfg.get('feature_ranking', None)
         top_k = opt_cfg.get('top_k', 80)
         n_trials = opt_cfg.get('n_trials', 3000)
@@ -827,17 +830,9 @@ def main(cfg: DictConfig):
         top_k = int(top_k)
         n_trials = int(n_trials)
 
-        # Initialize W&B with job_type="optimization"
-        wandb_config = OmegaConf.to_container(cfg, resolve=True)
-        if isinstance(wandb_config, dict):
-            wandb_config["resolved_seeds"] = resolved_seeds_to_dict(resolved)
-        wandb.init(
-            project=wandb_cfg.get('project', 'activation-bias-classifier'),
-            name=wandb_cfg.get('run_name', None),
-            job_type="optimization",
-            config=wandb_config
-        )
-        flush_option_scores_wandb_log()
+        project_root = hydra.utils.get_original_cwd()
+        artifacts_root = resolve_artifacts_root(cfg=cfg, project_root=project_root)
+        force = should_force(cfg)
 
         split_id = cfg.data.get('split_id', None)
         optimization_dataset = cfg.data.get('optimization_dataset')
@@ -855,19 +850,14 @@ def main(cfg: DictConfig):
 
         # Determine target features: from artifact or config
         if feature_artifact_name:
-            # Fetch SAE feature ranking artifact dynamically
+            feature_artifact_name = normalize_artifact_name(str(feature_artifact_name))
             print(
-                f"\nFetching feature ranking artifact: {feature_artifact_name}")
-            artifact = wandb.use_artifact(feature_artifact_name)
-            artifact_dir = artifact.download()
-
-            # Load ranked feature payload and slice top_k deterministically.
-            feature_ranking_path = os.path.join(artifact_dir, "feature_ranking.json")
-            if not os.path.exists(feature_ranking_path):
-                raise FileNotFoundError(
-                    "feature_ranking.json not found in feature artifact. "
-                    "Stage 5 requires ranked_features JSON payload."
-                )
+                f"\nLoading feature ranking artifact: {feature_artifact_name}")
+            feature_ranking_path = resolve_path(
+                feature_artifact_name,
+                "feature_ranking.json",
+                root=artifacts_root,
+            )
             with open(feature_ranking_path, "r", encoding="utf-8") as f:
                 feature_ranking_payload = json.load(f)
             ranked_features = feature_ranking_payload.get("ranked_features", [])
@@ -1269,7 +1259,7 @@ def main(cfg: DictConfig):
         artifacts_cfg = cfg.get('artifacts', {}) or {}
         multiplier_override = artifacts_cfg.get('multipliers', None)
         if multiplier_override:
-            multipliers_artifact_name = str(multiplier_override)
+            multipliers_artifact_name = normalize_artifact_name(str(multiplier_override))
         else:
             model_name_for_artifact = hydra_cfg.runtime.choices.get("model")
             if split_id and model_name_for_artifact:
@@ -1309,66 +1299,24 @@ def main(cfg: DictConfig):
             hydra_cfg.runtime.choices.get("model")
             or cfg.model.name.split("/")[-1]
         )
-        multipliers_artifact = wandb.Artifact(
-            name=multipliers_artifact_name,
-            type="model-weights",
-            description=(
-                "Optimized SAE additive decoded-delta coefficients "
-                f"({INTERVENTION_MODE}) for bias intervention"
-            ),
-            metadata={
-                'stage': 'optimization',
-                'model_name': str(model_name_meta),
-                'baseline_pi': baseline_pi,
-                'baseline_soft_score': baseline_ref,
-                'best_trial_number': best_trial.number,
-                'best_trial_value': best_trial.value,
-                'n_trials': n_trials,
-                'objective_mode': objective_mode,
-                'direction': direction,
-                'top_k': top_k,
-                'split_id': split_id,
-                'feature_ranking': feature_artifact_name,
-                'optimization_dataset': optimization_dataset_path,
-                'validation_dataset': validation_dataset_path,
-                'seed': seed,
-                'fast_sample_seed': fast_sample_seed,
-                'split_seed': split_seed,
-                'n_target_features': len(target_features),
-                'intervention_scope': intervention_scope,
-                'intervention_last_k': intervention_last_k,
-                'intervention_mode': INTERVENTION_MODE,
-                'coefficient_type': 'beta',
-                'decoder_normalization': decoder_normalization,
-                'edit_mode': edit_mode,
-                'auto_bounds': auto_bounds,
-                'bounds_multiplier': bounds_multiplier if auto_bounds else None,
-                'surrogate': 'expected_ipi_ae',
-                'seed_dependent_option_scores': shuffle_option_scores,
-                'option_mapping_seed': option_mapping_seed,
-                'option_scores': dict(option_scores),
-                **soft_metrics,
-            }
-        )
-        multipliers_artifact.add_file(results_path)
-        wandb.log_artifact(multipliers_artifact)
-        print(
-            f"Intervention multipliers artifact logged: {multipliers_artifact_name}")
-
-        # Log summary metrics to W&B
-        wandb.summary.update({
+        multipliers_metadata = {
+            'stage': 'optimization',
+            'model_name': str(model_name_meta),
             'baseline_pi': baseline_pi,
             'baseline_soft_score': baseline_ref,
-            'best_soft_score': best_trial.value,
-            'n_trials': len(study.trials),
-            'best_trial': best_trial.number,
-            'top_k': top_k,
+            'best_trial_number': best_trial.number,
+            'best_trial_value': best_trial.value,
+            'n_trials': n_trials,
+            'objective_mode': objective_mode,
             'direction': direction,
+            'top_k': top_k,
             'split_id': split_id,
             'feature_ranking': feature_artifact_name,
             'optimization_dataset': optimization_dataset_path,
             'validation_dataset': validation_dataset_path,
             'seed': seed,
+            'fast_sample_seed': fast_sample_seed,
+            'split_seed': split_seed,
             'n_target_features': len(target_features),
             'intervention_scope': intervention_scope,
             'intervention_last_k': intervention_last_k,
@@ -1378,8 +1326,21 @@ def main(cfg: DictConfig):
             'edit_mode': edit_mode,
             'auto_bounds': auto_bounds,
             'bounds_multiplier': bounds_multiplier if auto_bounds else None,
+            'surrogate': 'expected_ipi_ae',
+            'seed_dependent_option_scores': shuffle_option_scores,
+            'option_mapping_seed': option_mapping_seed,
+            'option_scores': dict(option_scores),
             **soft_metrics,
-        })
+        }
+        results_basename = os.path.basename(results_path)
+        artifact_path = write_artifact(
+            multipliers_artifact_name,
+            {results_basename: results_path},
+            multipliers_metadata,
+            root=artifacts_root,
+            force=force,
+        )
+        print(f"Intervention multipliers artifact written: {artifact_path}")
 
         # Print best solution for easy copy-paste into config
         print("\n" + "=" * 70)
@@ -1404,9 +1365,6 @@ def main(cfg: DictConfig):
             print(f"The optimizer {direction}d the signed soft PI.")
         print("To validate discrete IPI, run: python src/ipi_eval.py model=<name>")
         print("with the best multipliers from above.")
-
-        # Finish W&B run
-        wandb.finish()
 
     return study
 

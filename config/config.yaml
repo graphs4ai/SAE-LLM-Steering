@@ -84,7 +84,9 @@ poeta:
   seed: null
 
 # Stage I/O artifact names (inputs and outputs). Pipeline / CLI set these.
+# Payloads live under <root>/<name>/ with metadata.json.
 artifacts:
+  root: artifacts
   activations: null
   feature_ranking: null
   multipliers: null
@@ -115,9 +117,3 @@ pipeline:
 hydra:
   run:
     dir: runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-
-# W&B tracking
-wandb:
-  project: "SAE-LLM-Steering"
-  run_name: null
-  log_to_wandb: true

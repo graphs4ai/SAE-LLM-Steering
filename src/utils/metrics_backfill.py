@@ -1,11 +1,11 @@
-"""Read pipeline run metrics back from W&B into the manifest schema.
+"""Read pipeline run metrics back from local artifact metadata into manifests.
 
 This module is shared by `src/run_pipeline.py` (post-execution write-back) and
 `src/backfill_manifests.py` (ad-hoc rebuild) so both call sites use one source
-of truth for how a job's W&B output is mapped onto the local manifest
+of truth for how a job's artifact output is mapped onto the local manifest
 `metrics` block.
 
-Mapping (W&B -> manifest.metrics):
+Mapping (local metadata -> manifest.metrics):
   multipliers artifact metadata
       soft_ipi_optimization_baseline    -> soft_ipi_optimization_baseline
       soft_ipi_optimization_intervened  -> soft_ipi_optimization_intervened
@@ -13,7 +13,7 @@ Mapping (W&B -> manifest.metrics):
       soft_ipi_validation_baseline      -> soft_ipi_validation_baseline
       soft_ipi_validation_intervened    -> soft_ipi_validation_intervened
       delta_soft_ipi_validation         -> delta_soft_ipi_validation
-  intervened likert run summary
+  intervened IPI artifact metadata
       baseline_pi                       -> discrete_ipi_validation_* or discrete_ipi_test_*
       intervention_pi                   -> (same split bucket)
       pi_shift                          -> (same split bucket)
@@ -23,9 +23,14 @@ Mapping (W&B -> manifest.metrics):
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any
 
-import wandb
+from utils.local_artifacts import (
+    load_metadata,
+    normalize_artifact_name,
+    resolve_artifacts_root,
+)
 
 
 NULL_METRICS: dict[str, Any] = {
@@ -59,25 +64,6 @@ class MetricsBackfillError(RuntimeError):
     """Raised when manifest metric backfill cannot complete."""
 
 
-def _qualified_artifact_path(
-    artifact_ref: str,
-    project: str,
-    entity: str | None,
-) -> str:
-    """
-    Normalize an artifact reference to `[entity/]project/name:alias`.
-
-    `wandb.Api().artifact(...)` requires at minimum `project/name:alias`; the
-    manifest stores the bare form `name:alias`, so we add the missing prefix
-    components when they are not already present.
-    """
-    if "/" in artifact_ref:
-        return artifact_ref
-    if entity:
-        return f"{entity}/{project}/{artifact_ref}"
-    return f"{project}/{artifact_ref}"
-
-
 def _coerce_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -96,63 +82,11 @@ def _extract_soft_metrics(metadata: dict[str, Any]) -> dict[str, float | None]:
 
 def _fetch_multipliers_metadata(
     artifact_ref: str,
-    project: str,
-    entity: str | None,
+    *,
+    artifacts_root: Path | None = None,
 ) -> dict[str, Any]:
-    api = wandb.Api()
-    qualified = _qualified_artifact_path(artifact_ref, project=project, entity=entity)
-    artifact = api.artifact(qualified, type="model-weights")
-    return dict(getattr(artifact, "metadata", {}) or {})
-
-
-def _select_latest_run(runs: list[Any]) -> Any | None:
-    """Pick the most recently created run from a wandb runs iterable."""
-    if not runs:
-        return None
-
-    def _sort_key(run: Any) -> str:
-        created_at = getattr(run, "created_at", None)
-        return str(created_at) if created_at is not None else ""
-
-    return sorted(runs, key=_sort_key, reverse=True)[0]
-
-
-def _ipi_eval_split(run: Any) -> str:
-    """Classify which IPI split an IPI evaluation run used."""
-    summary = dict(getattr(run, "summary", {}) or {})
-    for key in ("ipi_eval_split", "likert_eval_split"):
-        summary_split = summary.get(key)
-        if summary_split in {"validation", "holdout_test"}:
-            return str(summary_split)
-
-    config = dict(getattr(run, "config", {}) or {})
-    for cfg_key in ("ipi", "likert"):
-        ipi_cfg = config.get(cfg_key) or {}
-        if isinstance(ipi_cfg, dict):
-            cfg_split = ipi_cfg.get("eval_split")
-            if cfg_split in {"validation", "holdout_test"}:
-                return str(cfg_split)
-
-    data_cfg = config.get("data") or {}
-    if not isinstance(data_cfg, dict):
-        data_cfg = {}
-
-    eval_dataset = summary.get("ipi_eval_dataset") or summary.get("likert_eval_dataset")
-    if eval_dataset is None:
-        return "unknown"
-
-    eval_path = str(eval_dataset)
-    validation_path = data_cfg.get("validation_dataset")
-    if validation_path is not None and eval_path.endswith(str(validation_path)):
-        return "validation"
-    test_path = data_cfg.get("ipi_test_dataset")
-    if test_path is not None and eval_path.endswith(str(test_path)):
-        return "holdout_test"
-    if "ipi_questions_val" in eval_path:
-        return "validation"
-    if "ipi_questions_test" in eval_path:
-        return "holdout_test"
-    return "unknown"
+    name = normalize_artifact_name(artifact_ref)
+    return load_metadata(name, root=artifacts_root)
 
 
 def _empty_likert_metrics() -> dict[str, float | None]:
@@ -220,51 +154,55 @@ def _map_likert_summary_to_metrics(
     return metrics
 
 
+def _ipi_eval_split_from_metadata(metadata: dict[str, Any]) -> str:
+    split = metadata.get("ipi_eval_split") or metadata.get("likert_eval_split")
+    if split in {"validation", "holdout_test"}:
+        return str(split)
+    eval_dataset = metadata.get("ipi_eval_dataset") or metadata.get("likert_eval_dataset")
+    if eval_dataset is None:
+        return "unknown"
+    eval_path = str(eval_dataset)
+    if "ipi_questions_val" in eval_path:
+        return "validation"
+    if "ipi_questions_test" in eval_path:
+        return "holdout_test"
+    return "unknown"
+
+
 def _fetch_likert_metrics(
-    multipliers_ref: str,
-    project: str,
-    entity: str | None,
+    manifest: dict[str, Any],
+    *,
+    artifacts_root: Path | None = None,
 ) -> dict[str, float | None]:
-    """
-    Locate the intervened Likert W&B run whose config references our
-    multipliers artifact, then read the 4 discrete-IPI/Wilcoxon values out of
-    its summary.
-    """
-    api = wandb.Api()
-    path = f"{entity}/{project}" if entity else project
-
-    filters = {
-        "$or": [
-            {"config.artifacts.multipliers": multipliers_ref},
-            {"config.multiplier_artifact_name": multipliers_ref},
-            {"config.ipi.multiplier_artifact_name": multipliers_ref},
-            {"config.ipi_eval.multiplier_artifact_name": multipliers_ref},
-        ]
-    }
-    try:
-        runs_iter = api.runs(path=path, filters=filters)
-        runs = list(runs_iter)
-    except Exception as exc:
-        raise MetricsBackfillError(
-            f"Failed to query Likert runs for multipliers={multipliers_ref!r}: {exc}"
-        ) from exc
-
-    run = _select_latest_run(runs)
-    if run is None:
+    """Read discrete IPI metrics from the intervened IPI local artifact metadata."""
+    artifacts = manifest.get("artifacts") or {}
+    intervened_ref = artifacts.get("ipi_intervened")
+    if not intervened_ref:
         return _empty_likert_metrics()
 
-    summary = dict(getattr(run, "summary", {}) or {})
-    eval_split = _ipi_eval_split(run)
-    return _map_likert_summary_to_metrics(summary, eval_split=eval_split)
+    try:
+        metadata = load_metadata(
+            normalize_artifact_name(str(intervened_ref)),
+            root=artifacts_root,
+        )
+    except FileNotFoundError:
+        return _empty_likert_metrics()
+
+    eval_split = _ipi_eval_split_from_metadata(metadata)
+    return _map_likert_summary_to_metrics(metadata, eval_split=eval_split)
 
 
 def collect_run_metrics(
     manifest: dict[str, Any],
-    project: str,
+    *,
+    artifacts_root: Path | str | None = None,
+    project_root: Path | str | None = None,
+    # Kept for CLI compatibility with older backfill invocations.
+    project: str | None = None,
     entity: str | None = None,
 ) -> dict[str, float | None]:
     """
-    Build the manifest `metrics` block for one job by reading W&B.
+    Build the manifest `metrics` block for one job by reading local artifacts.
 
     Returns a dict aligned with `NULL_METRICS`. Missing values are returned as
     None rather than raising, so callers can merge the partial dict onto the
@@ -273,6 +211,9 @@ def collect_run_metrics(
     Raises `MetricsBackfillError` only on infrastructure failures (e.g. the
     multipliers artifact itself is unresolvable).
     """
+    del project, entity  # unused; retained for call-site compatibility
+
+    root = resolve_artifacts_root(artifacts_root, project_root=project_root)
     artifacts = manifest.get("artifacts") or {}
     multipliers_ref = artifacts.get("multipliers")
     if not multipliers_ref:
@@ -283,7 +224,7 @@ def collect_run_metrics(
 
     try:
         metadata = _fetch_multipliers_metadata(
-            multipliers_ref, project=project, entity=entity
+            str(multipliers_ref), artifacts_root=root
         )
     except Exception as exc:
         raise MetricsBackfillError(
@@ -291,9 +232,7 @@ def collect_run_metrics(
         ) from exc
 
     soft_metrics = _extract_soft_metrics(metadata)
-    likert_metrics = _fetch_likert_metrics(
-        multipliers_ref, project=project, entity=entity
-    )
+    likert_metrics = _fetch_likert_metrics(manifest, artifacts_root=root)
 
     result = dict(NULL_METRICS)
     result.update(soft_metrics)
@@ -303,7 +242,10 @@ def collect_run_metrics(
 
 def collect_run_identity(
     manifest: dict[str, Any],
-    project: str,
+    *,
+    artifacts_root: Path | str | None = None,
+    project_root: Path | str | None = None,
+    project: str | None = None,
     entity: str | None = None,
 ) -> dict[str, Any]:
     """
@@ -315,6 +257,9 @@ def collect_run_identity(
     Missing keys are simply omitted (the caller decides whether to keep the
     existing manifest value or fall back to a default).
     """
+    del project, entity
+
+    root = resolve_artifacts_root(artifacts_root, project_root=project_root)
     artifacts = manifest.get("artifacts") or {}
     multipliers_ref = artifacts.get("multipliers")
     if not multipliers_ref:
@@ -325,7 +270,7 @@ def collect_run_identity(
 
     try:
         metadata = _fetch_multipliers_metadata(
-            multipliers_ref, project=project, entity=entity
+            str(multipliers_ref), artifacts_root=root
         )
     except Exception as exc:
         raise MetricsBackfillError(

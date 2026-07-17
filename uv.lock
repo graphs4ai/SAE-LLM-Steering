@@ -3729,7 +3729,6 @@ dependencies = [
     { name = "transformer-lens" },
     { name = "transformers" },
     { name = "umap-learn" },
-    { name = "wandb" },
 ]
 
 [package.metadata]
@@ -3755,7 +3754,6 @@ requires-dist = [
     { name = "transformer-lens" },
     { name = "transformers" },
     { name = "umap-learn", specifier = ">=0.5.6" },
-    { name = "wandb" },
 ]
 
 [[package]]

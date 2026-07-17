@@ -23,18 +23,23 @@ import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Generator, Union
 import re
-import wandb
-import glob
 from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 
 from utils.intervention_hooks import DEFAULT_LAST_K, DEFAULT_SCOPE, assert_scope
 from utils.ipi_surrogate import (
     IPI_OPTION_SCORES,
-    flush_option_scores_wandb_log,
     resolve_option_scores,
 )
 from utils.ipi_prompts import create_ipi_prompt, format_chat_prompt
+from utils.local_artifacts import (
+    find_file,
+    load_metadata,
+    normalize_artifact_name,
+    resolve_artifacts_root,
+    should_force,
+    write_artifact,
+)
 
 _IPI_EVAL_SPLITS = {
     "validation": "validation_dataset",
@@ -170,17 +175,17 @@ def save_ipi_prompt_answer_txt(
     return path
 
 
-def _attach_transcript_files_to_artifact(
-    artifact: wandb.Artifact,
+def _attach_transcript_files(
+    files: Dict[str, str],
     transcripts_dir: Optional[Path],
     *,
     artifact_subdir: Optional[str] = None,
 ) -> int:
-    """Attach .txt transcripts under ipi_transcripts/ in the W&B artifact.
+    """Collect .txt transcripts into a dest_name -> source_path mapping.
 
     When logging baseline and intervention into one artifact, pass distinct
     ``artifact_subdir`` values (e.g. ``baseline``, ``intervention``) so
-    identical per-question filenames do not collide in the manifest.
+    identical per-question filenames do not collide.
     """
     if transcripts_dir is None or not transcripts_dir.is_dir():
         return 0
@@ -188,7 +193,7 @@ def _attach_transcript_files_to_artifact(
     prefix = f"ipi_transcripts/{sub}/" if sub else "ipi_transcripts/"
     count = 0
     for txt_path in sorted(transcripts_dir.glob("*.txt")):
-        artifact.add_file(str(txt_path), name=f"{prefix}{txt_path.name}")
+        files[f"{prefix}{txt_path.name}"] = str(txt_path)
         count += 1
     return count
 
@@ -672,10 +677,7 @@ def main(cfg: DictConfig):
     Main function to run discrete IPI evaluation.
     """
     from utils.ipi_surrogate import (
-        _wandb_safe_option_scores_payload,
         build_option_scores_log_payload,
-        resolve_option_mapping_seed,
-        seed_dependent_option_scores_enabled,
     )
     from utils.seeds import (
         apply_torch_seed,
@@ -688,11 +690,13 @@ def main(cfg: DictConfig):
     apply_torch_seed(resolved.ipi)
     log_resolved_seeds(resolved, prefix="ipi_eval")
 
-    wandb_cfg = cfg.get('wandb', {})
     ipi_cfg = _ipi_cfg(cfg)
     intervention_cfg = cfg.get("intervention", {}) or {}
     artifacts_cfg = cfg.get("artifacts", {}) or {}
     language = str(ipi_cfg.get('language', 'pt'))
+    project_root = hydra.utils.get_original_cwd()
+    artifacts_root = resolve_artifacts_root(cfg=cfg, project_root=project_root)
+    force = should_force(cfg)
 
     option_scores = resolve_option_scores(cfg)
     option_scores_log = build_option_scores_log_payload(
@@ -700,6 +704,8 @@ def main(cfg: DictConfig):
     )
 
     multiplier_artifact_name = artifacts_cfg.get('multipliers', None)
+    if multiplier_artifact_name:
+        multiplier_artifact_name = normalize_artifact_name(str(multiplier_artifact_name))
 
     intervention_scope = str(
         intervention_cfg.get('intervention_scope', DEFAULT_SCOPE)
@@ -728,37 +734,7 @@ def main(cfg: DictConfig):
     max_new_tokens = int(ipi_cfg.get('max_new_tokens', 10))
     temperature = float(ipi_cfg.get('temperature', 0.0))
 
-    wandb_config = OmegaConf.to_container(cfg, resolve=True)
     questions_path, ipi_eval_split = _resolve_ipi_questions_dataset(cfg)
-    wandb_config.update(
-        {
-            'ipi_eval_split': ipi_eval_split,
-            'ipi_eval_dataset': questions_path,
-            'language': language,
-            'temperature': temperature,
-            'multiplier_artifact_name': multiplier_artifact_name,
-            'ipi_seed': resolved.ipi,
-            'resolved_seeds': resolved_seeds_to_dict(resolved),
-            'seed_dependent_option_scores': seed_dependent_option_scores_enabled(
-                cfg
-            ),
-            'option_mapping_seed': (
-                resolve_option_mapping_seed(cfg)
-                if seed_dependent_option_scores_enabled(cfg)
-                else None
-            ),
-            'option_scores': dict(option_scores),
-            **_wandb_safe_option_scores_payload(option_scores_log),
-        }
-    )
-
-    wandb.init(
-        project=wandb_cfg.get('project', 'activation-bias-classifier'),
-        name=wandb_cfg.get('run_name', None),
-        job_type="ipi_eval",
-        config=wandb_config,
-    )
-    flush_option_scores_wandb_log()
 
     print(f"Loading questions from {questions_path} (ipi.eval_split={ipi_eval_split})...")
 
@@ -794,19 +770,12 @@ def main(cfg: DictConfig):
     activation_multipliers = None
 
     if multiplier_artifact_name:
-        # Fetch multipliers from W&B artifact
-        print(f"\nFetching multiplier artifact: {multiplier_artifact_name}")
-        artifact = wandb.use_artifact(multiplier_artifact_name)
-        artifact_dir = artifact.download()
-
-        # Find optimization results JSON file
-        json_files = glob.glob(os.path.join(
-            artifact_dir, "optimization_results_*.json"))
-        if not json_files:
-            raise FileNotFoundError(
-                f"No optimization_results_*.json found in artifact: {artifact_dir}")
-
-        results_path = json_files[0]  # Take the most recent if multiple
+        print(f"\nLoading multiplier artifact: {multiplier_artifact_name}")
+        results_path = find_file(
+            multiplier_artifact_name,
+            "optimization_results_*.json",
+            root=artifacts_root,
+        )
         with open(results_path, 'r', encoding='utf-8') as f:
             opt_results = json.load(f)
 
@@ -821,7 +790,9 @@ def main(cfg: DictConfig):
         # If the multipliers were optimized under a specific scope, prefer that
         # scope over the config so the eval distribution matches the
         # optimization distribution. Warn loudly when they disagree.
-        artifact_metadata = dict(getattr(artifact, 'metadata', {}) or {})
+        artifact_metadata = load_metadata(
+            multiplier_artifact_name, root=artifacts_root
+        )
         artifact_scope = artifact_metadata.get('intervention_scope')
         artifact_last_k = artifact_metadata.get('intervention_last_k')
         artifact_decoder_normalization = artifact_metadata.get('decoder_normalization')
@@ -1011,28 +982,43 @@ def main(cfg: DictConfig):
         for name, path in viz_results['artifacts'].items():
             print(f"  {name}: {path}")
 
-        # --- Log to W&B ---
-        # Log visualizations as images
-        wandb_images = {}
+        # Persist comparison metrics in local artifact metadata.
+        question_stats = viz_results.get('question_level_stats', {}) or {}
+        artifacts_cfg = cfg.get("artifacts", {}) or {}
+        intervened_artifact_name = normalize_artifact_name(
+            str(artifacts_cfg.get("ipi_intervened") or "ipi-comparison-results")
+        )
+        comparison_files: Dict[str, str] = {
+            f"baseline_{Path(baseline_saved['sentences_csv']).name}": baseline_saved['sentences_csv'],
+            f"baseline_{Path(baseline_saved['pairs_csv']).name}": baseline_saved['pairs_csv'],
+            f"baseline_{Path(baseline_saved['metrics_json']).name}": baseline_saved['metrics_json'],
+            f"intervention_{Path(intervention_saved['sentences_csv']).name}": intervention_saved['sentences_csv'],
+            f"intervention_{Path(intervention_saved['pairs_csv']).name}": intervention_saved['pairs_csv'],
+            f"intervention_{Path(intervention_saved['metrics_json']).name}": intervention_saved['metrics_json'],
+        }
+        baseline_transcript_count = _attach_transcript_files(
+            comparison_files,
+            baseline_transcripts_dir,
+            artifact_subdir="baseline",
+        )
+        intervention_transcript_count = _attach_transcript_files(
+            comparison_files,
+            intervention_transcripts_dir,
+            artifact_subdir="intervention",
+        )
         for name, path in viz_results['artifacts'].items():
-            if path and path.endswith('.png'):
-                wandb_images[f"comparison/{name}"] = wandb.Image(path)
-        if wandb_images:
-            wandb.log(wandb_images)
+            if path and os.path.exists(path):
+                comparison_files[Path(path).name] = path
 
-        # Log comparison metrics.
-        # `multiplier_artifact_name` is mirrored into the run summary so the
-        # backfill helper can match this Likert run back to its source
-        # multipliers artifact even if W&B config-path indexing changes.
-        wandb.summary.update({
+        comparison_metadata = {
             'baseline_pi': baseline_metrics['model_polarization_index'],
             'intervention_pi': intervention_metrics['model_polarization_index'],
             'pi_shift': pi_shift,
             'baseline_std': baseline_metrics['pi_std'],
             'intervention_std': intervention_metrics['pi_std'],
-            'test_pvalue': viz_results.get('question_level_stats', {}).get('test_pvalue'),
-            'test_statistic': viz_results.get('question_level_stats', {}).get('test_statistic'),
-            'test_type': viz_results.get('question_level_stats', {}).get('test_type'),
+            'test_pvalue': question_stats.get('test_pvalue'),
+            'test_statistic': question_stats.get('test_statistic'),
+            'test_type': question_stats.get('test_type'),
             'ipi_eval_split': ipi_eval_split,
             'ipi_eval_dataset': questions_path,
             'n_multipliers': len(activation_multipliers),
@@ -1041,62 +1027,22 @@ def main(cfg: DictConfig):
             'intervention_last_k': intervention_last_k,
             'decoder_normalization': decoder_normalization,
             'edit_mode': edit_mode,
-        })
-
-        # Create and log comparison artifact.
-        artifacts_cfg = cfg.get("artifacts", {}) or {}
-        intervened_artifact_name = (
-            artifacts_cfg.get("ipi_intervened") or "ipi-comparison-results"
+            'ipi_transcript_count_baseline': baseline_transcript_count,
+            'ipi_transcript_count_intervention': intervention_transcript_count,
+            'resolved_seeds': resolved_seeds_to_dict(resolved),
+            'option_scores': dict(option_scores),
+            **option_scores_log,
+        }
+        artifact_path = write_artifact(
+            intervened_artifact_name,
+            comparison_files,
+            comparison_metadata,
+            root=artifacts_root,
+            force=force,
         )
-        comparison_artifact = wandb.Artifact(
-            name=intervened_artifact_name,
-            type="evaluation-comparison",
-            description="Baseline vs Intervention IPI evaluation comparison",
-            metadata={
-                'baseline_pi': baseline_metrics['model_polarization_index'],
-                'intervention_pi': intervention_metrics['model_polarization_index'],
-                'pi_shift': pi_shift,
-                'test_pvalue': viz_results.get('question_level_stats', {}).get('test_pvalue'),
-                'test_type': viz_results.get('question_level_stats', {}).get('test_type'),
-                'multiplier_artifact_name': multiplier_artifact_name,
-                'decoder_normalization': decoder_normalization,
-                'edit_mode': edit_mode,
-            }
-        )
-
-        # Add all result files
-        comparison_artifact.add_file(baseline_saved['sentences_csv'])
-        comparison_artifact.add_file(baseline_saved['pairs_csv'])
-        comparison_artifact.add_file(baseline_saved['metrics_json'])
-        comparison_artifact.add_file(intervention_saved['sentences_csv'])
-        comparison_artifact.add_file(intervention_saved['pairs_csv'])
-        comparison_artifact.add_file(intervention_saved['metrics_json'])
-        baseline_transcript_count = _attach_transcript_files_to_artifact(
-            comparison_artifact,
-            baseline_transcripts_dir,
-            artifact_subdir="baseline",
-        )
-        intervention_transcript_count = _attach_transcript_files_to_artifact(
-            comparison_artifact,
-            intervention_transcripts_dir,
-            artifact_subdir="intervention",
-        )
-
-        # Add visualizations
-        for name, path in viz_results['artifacts'].items():
-            if path and os.path.exists(path):
-                comparison_artifact.add_file(path)
-
-        wandb.log_artifact(comparison_artifact)
-        wandb.summary.update({
-            "ipi_transcript_count_baseline": baseline_transcript_count,
-            "ipi_transcript_count_intervention": intervention_transcript_count,
-            "ipi_transcripts_dir_baseline": str(baseline_transcripts_dir),
-            "ipi_transcripts_dir_intervention": str(intervention_transcripts_dir),
-        })
-        print(f"\nComparison artifact logged to W&B: {intervened_artifact_name}")
+        print(f"\nComparison artifact written: {artifact_path}")
         print(
-            "IPI transcripts logged to W&B: "
+            "IPI transcripts stored: "
             f"{baseline_transcript_count} baseline, "
             f"{intervention_transcript_count} intervention .txt files"
         )
@@ -1193,58 +1139,46 @@ def main(cfg: DictConfig):
 
         # Log baseline artifact.
         artifacts_cfg = cfg.get("artifacts", {}) or {}
-        artifact_name = (
-            artifacts_cfg.get("ipi_baseline") or "ipi-baseline-results"
+        artifact_name = normalize_artifact_name(
+            str(artifacts_cfg.get("ipi_baseline") or "ipi-baseline-results")
         )
-        ipi_artifact = wandb.Artifact(
-            name=artifact_name,
-            type="evaluation-data",
-            description="IPI evaluation results (baseline, no intervention)",
-            metadata={
-                'model_polarization_index': metrics.get('model_polarization_index'),
-                'pi_std': metrics.get('pi_std'),
-                'interpretation': metrics.get('interpretation'),
-                'valid_pairs': metrics.get('valid_pairs'),
-                'total_pairs': metrics.get('total_pairs'),
-                'has_intervention': False,
-                'decoder_normalization': decoder_normalization,
-                'edit_mode': edit_mode,
-            }
+        baseline_files: Dict[str, str] = {
+            Path(saved_files['sentences_csv']).name: saved_files['sentences_csv'],
+            Path(saved_files['pairs_csv']).name: saved_files['pairs_csv'],
+            Path(saved_files['metrics_json']).name: saved_files['metrics_json'],
+        }
+        transcript_count = _attach_transcript_files(
+            baseline_files, single_transcripts_dir
         )
-
-        ipi_artifact.add_file(saved_files['sentences_csv'])
-        ipi_artifact.add_file(saved_files['pairs_csv'])
-        ipi_artifact.add_file(saved_files['metrics_json'])
-        transcript_count = _attach_transcript_files_to_artifact(
-            ipi_artifact, single_transcripts_dir
-        )
-
-        wandb.log_artifact(ipi_artifact)
-        print(f"IPI results artifact logged: {artifact_name}")
-        if transcript_count:
-            print(
-                f"IPI transcripts logged to W&B: {transcript_count} .txt files "
-                f"under ipi_transcripts/"
-            )
-
-        # Log summary metrics to W&B
-        wandb.summary.update({
+        baseline_metadata = {
             'model_polarization_index': metrics.get('model_polarization_index'),
             'pi_std': metrics.get('pi_std'),
             'interpretation': metrics.get('interpretation'),
             'valid_pairs': metrics.get('valid_pairs'),
             'total_pairs': metrics.get('total_pairs'),
             'has_intervention': False,
-            'ipi_eval_split': ipi_eval_split,
-            'ipi_eval_dataset': questions_path,
             'decoder_normalization': decoder_normalization,
             'edit_mode': edit_mode,
+            'ipi_eval_split': ipi_eval_split,
+            'ipi_eval_dataset': questions_path,
             'ipi_transcript_count': transcript_count,
-            'ipi_transcripts_dir': str(single_transcripts_dir),
-        })
-
-    # Finish W&B run
-    wandb.finish()
+            'resolved_seeds': resolved_seeds_to_dict(resolved),
+            'option_scores': dict(option_scores),
+            **option_scores_log,
+        }
+        artifact_path = write_artifact(
+            artifact_name,
+            baseline_files,
+            baseline_metadata,
+            root=artifacts_root,
+            force=force,
+        )
+        print(f"IPI results artifact written: {artifact_path}")
+        if transcript_count:
+            print(
+                f"IPI transcripts stored: {transcript_count} .txt files "
+                f"under ipi_transcripts/"
+            )
 
     return results_df, pi_data
 

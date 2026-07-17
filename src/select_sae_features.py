@@ -1,6 +1,6 @@
 """Stage 2: SAE feature selection.
 
-Ranks SAE latent columns from the activations W&B artifact and emits a
+Ranks SAE latent columns from the activations local artifact and emits a
 ranked-feature artifact for ``optimize_sae_steering.py``.
 """
 
@@ -10,15 +10,24 @@ import json
 import os
 import re
 import struct
+import tempfile
 from typing import Any
 
 import hydra
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import wandb
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
+
+from utils.local_artifacts import (
+    artifact_exists,
+    find_file,
+    normalize_artifact_name,
+    resolve_artifacts_root,
+    should_force,
+    write_artifact,
+)
 
 
 _FEATURE_COL_RE = re.compile(r"^layer_(\d+)-feature_(\d+)$")
@@ -198,16 +207,6 @@ def _score_paired_contrastive_chunked(
     return scores
 
 
-def _find_parquet(artifact_dir: str) -> str:
-    for root, _dirs, files in os.walk(artifact_dir):
-        for name in files:
-            if name.endswith(".parquet"):
-                return os.path.join(root, name)
-    raise FileNotFoundError(
-        f"No parquet file found in activations artifact dir: {artifact_dir}"
-    )
-
-
 def _decoder_norms_for_ranked_features(
     cfg: DictConfig,
     ranked_features: list[dict[str, Any]],
@@ -239,7 +238,6 @@ def main(cfg: DictConfig) -> None:
     from utils.seeds import (
         log_resolved_seeds,
         resolve_seeds_from_cfg,
-        resolved_seeds_to_dict,
     )
 
     resolved = resolve_seeds_from_cfg(cfg)
@@ -248,8 +246,10 @@ def main(cfg: DictConfig) -> None:
 
     hydra_cfg = HydraConfig.get()
     run_dir = hydra_cfg.runtime.output_dir
+    project_root = hydra.utils.get_original_cwd()
+    artifacts_root = resolve_artifacts_root(cfg=cfg, project_root=project_root)
+    force = should_force(cfg)
 
-    wandb_cfg = cfg.get("wandb", {}) or {}
     fs_cfg = cfg.get("feature_selection", {}) or {}
     method = str(fs_cfg.get("method", "mean_activation"))
     min_active_rate = float(fs_cfg.get("min_active_rate", 0.0))
@@ -264,24 +264,42 @@ def main(cfg: DictConfig) -> None:
     if not activations_artifact_name:
         raise ValueError(
             "artifacts.activations must be set "
-            "(W&B activations artifact from extract_activations)."
+            "(local activations artifact from extract_activations)."
+        )
+    activations_artifact_name = normalize_artifact_name(str(activations_artifact_name))
+
+    model_name = cfg.model.name.split("/")[-1]
+    split_id = cfg.data.get("split_id", None)
+    feature_ranking_override = artifacts_cfg.get("feature_ranking", None)
+    if feature_ranking_override:
+        feature_artifact_name_out = normalize_artifact_name(str(feature_ranking_override))
+    else:
+        feature_artifact_name_out = (
+            f"feature-ranking-{model_name}-"
+            f"{split_id or 'nosplit'}-top{ranking_top_n}"
         )
 
-    wandb_config = OmegaConf.to_container(cfg, resolve=True)
-    if isinstance(wandb_config, dict):
-        wandb_config["resolved_seeds"] = resolved_seeds_to_dict(resolved)
+    if (
+        not force
+        and artifact_exists(
+            feature_artifact_name_out,
+            required_files=["feature_ranking.json"],
+            root=artifacts_root,
+        )
+    ):
+        print(
+            f"[skip] feature ranking artifact already exists: "
+            f"{feature_artifact_name_out} (under {artifacts_root})"
+        )
+        return
 
-    wandb.init(
-        project=wandb_cfg.get("project", "SAE-LLM-Steering"),
-        name=wandb_cfg.get("run_name", None),
-        job_type="feature_selection",
-        config=wandb_config,
+    parquet_path = str(
+        find_file(
+            activations_artifact_name,
+            "*.parquet",
+            root=artifacts_root,
+        )
     )
-
-    print(f"Downloading activations artifact: {activations_artifact_name}")
-    artifact = wandb.use_artifact(activations_artifact_name, type="dataset")
-    artifact_dir = artifact.download()
-    parquet_path = _find_parquet(artifact_dir)
     print(f"Using activations parquet: {parquet_path}")
 
     pf = _open_activations_parquet(parquet_path)
@@ -359,8 +377,6 @@ def main(cfg: DictConfig) -> None:
     for entry in ranked_features:
         entry["decoder_norm"] = decoder_norms.get(entry["feature_name"])
 
-    model_name = cfg.model.name.split("/")[-1]
-    split_id = cfg.data.get("split_id", None)
     feature_selection_dataset = cfg.data.get("feature_selection_dataset", None)
     prompt_mode = str(cfg.get("extraction", {}).get("prompt_mode", "bare_statement"))
 
@@ -381,32 +397,17 @@ def main(cfg: DictConfig) -> None:
         "ranked_features": ranked_features,
     }
 
-    feature_ranking_json_path = os.path.join(run_dir, "feature_ranking.json")
-    with open(feature_ranking_json_path, "w", encoding="utf-8") as f:
-        json.dump(ranking_payload, f, indent=2, ensure_ascii=False)
-    print(f"Feature ranking JSON saved to: {feature_ranking_json_path}")
+    with tempfile.TemporaryDirectory(dir=run_dir) as tmp_dir:
+        feature_ranking_json_path = os.path.join(tmp_dir, "feature_ranking.json")
+        with open(feature_ranking_json_path, "w", encoding="utf-8") as f:
+            json.dump(ranking_payload, f, indent=2, ensure_ascii=False)
 
-    feature_ranking_csv_path = os.path.join(run_dir, "feature_ranking.csv")
-    pd.DataFrame(ranked_features).to_csv(feature_ranking_csv_path, index=False)
-    print(f"Feature ranking CSV saved to: {feature_ranking_csv_path}")
+        feature_ranking_csv_path = os.path.join(tmp_dir, "feature_ranking.csv")
+        pd.DataFrame(ranked_features).to_csv(feature_ranking_csv_path, index=False)
 
-    feature_ranking_override = artifacts_cfg.get("feature_ranking", None)
-    if feature_ranking_override:
-        feature_artifact_name_out = str(feature_ranking_override)
-    else:
-        feature_artifact_name_out = (
-            f"feature-ranking-{model_name}-"
-            f"{split_id or 'nosplit'}-top{ranking_top_n_effective}"
-        )
-
-    feature_artifact = wandb.Artifact(
-        name=feature_artifact_name_out,
-        type="dataset",
-        description=(
-            "SAE feature ranking on the feature-selection activations artifact"
-        ),
-        metadata={
+        metadata = {
             "n_features": ranking_top_n_effective,
+            "n_candidate_features": len(feature_columns),
             "method": method,
             "model_name": model_name,
             "split_id": split_id,
@@ -419,21 +420,20 @@ def main(cfg: DictConfig) -> None:
             "decoder_normalization": "unit_norm",
             "coefficient_type": "beta",
             "edit_mode": "additive_latent_delta",
-        },
-    )
-    feature_artifact.add_file(feature_ranking_json_path)
-    feature_artifact.add_file(feature_ranking_csv_path)
-    wandb.log_artifact(feature_artifact)
-    print(f"Feature ranking artifact logged: {feature_artifact_name_out}")
-
-    wandb.summary.update({
-        "n_features": ranking_top_n_effective,
-        "n_candidate_features": len(feature_columns),
-        "method": method,
-        "top_feature": ranked_features[0]["feature_name"] if ranked_features else None,
-        "top_score": ranked_features[0]["selection_score"] if ranked_features else None,
-    })
-    wandb.finish()
+            "top_feature": ranked_features[0]["feature_name"] if ranked_features else None,
+            "top_score": ranked_features[0]["selection_score"] if ranked_features else None,
+        }
+        artifact_path = write_artifact(
+            feature_artifact_name_out,
+            {
+                "feature_ranking.json": feature_ranking_json_path,
+                "feature_ranking.csv": feature_ranking_csv_path,
+            },
+            metadata,
+            root=artifacts_root,
+            force=force,
+        )
+        print(f"Feature ranking artifact written: {artifact_path}")
 
 
 if __name__ == "__main__":

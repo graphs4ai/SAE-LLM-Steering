@@ -12,7 +12,7 @@ Sibling project to [llm-lobotomy](../llm-lobotomy). It reuses the same end-to-en
 5. poeta_evaluator.py          → capability benchmark
 ```
 
-Orchestration, artifact naming, and manifest tracking use Hydra + W&B via `src/run_pipeline.py`.
+Orchestration and artifact naming use Hydra via `src/run_pipeline.py`. Stage outputs are stored under `artifacts/<name>/` (configurable via `artifacts.root`). Extract and ranking are skipped when their local artifacts already exist; pass `pipeline.force=true` to recompute.
 
 See `notebooks/gemma_scope2_playground.ipynb` for an interactive Gemma Scope 2 sandbox on `google/gemma-3-4b-it`.
 
@@ -20,14 +20,10 @@ See `notebooks/gemma_scope2_playground.ipynb` for an interactive Gemma Scope 2 s
 
 ```bash
 uv sync
-wandb login
 huggingface-cli login  # gated Gemma weights
 
 # Dry-run the full sweep matrix
-uv run python src/run_pipeline.py experiment=k80_trials pipeline.dry_run=true
-
-# Gemma Scope playground
-uv run jupyter lab notebooks/gemma_scope2_playground.ipynb
+uv run python src/run_pipeline.py experiment=gemma_scope pipeline.dry_run=true
 
 # Individual stages
 uv run python src/extract_activations.py model=gemma-3-4b

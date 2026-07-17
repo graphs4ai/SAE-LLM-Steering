@@ -181,35 +181,7 @@ def log_option_scores_mapping(
     )
     print(message)
     _logger.info(message)
-    flush_option_scores_wandb_log()
     return payload
-
-
-def _wandb_safe_option_scores_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """W&B config/summary encoding requires string keys in nested dicts."""
-    safe: dict[str, Any] = {}
-    for key, value in payload.items():
-        if isinstance(value, dict):
-            safe[key] = {str(k): v for k, v in value.items()}
-        else:
-            safe[key] = value
-    return safe
-
-
-def flush_option_scores_wandb_log() -> bool:
-    """Push the last option-score mapping to the active W&B run, if any."""
-    if _last_option_scores_log is None:
-        return False
-    try:
-        import wandb
-    except ImportError:
-        return False
-    if wandb.run is None:
-        return False
-    safe_payload = _wandb_safe_option_scores_payload(_last_option_scores_log)
-    wandb.config.update(safe_payload, allow_val_change=True)
-    wandb.summary.update(safe_payload)
-    return True
 
 
 def _ipi_cfg(cfg: Any) -> dict[str, Any]:

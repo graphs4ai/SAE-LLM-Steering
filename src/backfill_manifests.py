@@ -1,14 +1,15 @@
-"""Rebuild pipeline manifest metrics from W&B without re-running heavy stages.
+"""Rebuild pipeline manifest metrics from local artifacts without re-running heavy stages.
 
 Standalone CLI (no Hydra). Walks `runs/pipeline/*/manifest.json`, looks up the
-W&B run that produced each completed job, and rewrites the manifest in place
-with the resolved metric values.
+local artifacts that produced each completed job, and rewrites the manifest in
+place with the resolved metric values.
 
 Usage:
-    python src/backfill_manifests.py --project LLM-Lobotomy
-    python src/backfill_manifests.py --project LLM-Lobotomy --dry-run
-    python src/backfill_manifests.py --project LLM-Lobotomy --force
-    python src/backfill_manifests.py --project LLM-Lobotomy --run-id "*k4*"
+    python src/backfill_manifests.py
+    python src/backfill_manifests.py --dry-run
+    python src/backfill_manifests.py --force
+    python src/backfill_manifests.py --run-id "*k4*"
+    python src/backfill_manifests.py --artifacts-root artifacts
 """
 
 from __future__ import annotations
@@ -38,19 +39,14 @@ from utils.metrics_backfill import (  # noqa: E402
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Backfill pipeline manifest metrics from W&B without rerunning "
-            "heavy jobs."
+            "Backfill pipeline manifest metrics from local artifacts without "
+            "rerunning heavy jobs."
         )
     )
     parser.add_argument(
-        "--project",
-        required=True,
-        help="W&B project name (e.g. 'LLM-Lobotomy').",
-    )
-    parser.add_argument(
-        "--entity",
-        default=None,
-        help="W&B entity (team/user). Optional; falls back to your default.",
+        "--artifacts-root",
+        default=str(_PROJECT_ROOT / "artifacts"),
+        help="Root directory for local artifacts (default: <repo>/artifacts).",
     )
     parser.add_argument(
         "--pipeline-dir",
@@ -141,6 +137,7 @@ def _matches_filter(run_id: str, pattern: str | None) -> bool:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     pipeline_dir = Path(args.pipeline_dir).resolve()
+    artifacts_root = Path(args.artifacts_root).resolve()
     if not pipeline_dir.exists():
         print(f"Pipeline directory not found: {pipeline_dir}")
         return 1
@@ -151,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print(
-        f"Backfill plan: project={args.project!r} entity={args.entity!r} "
+        f"Backfill plan: artifacts_root={artifacts_root} "
         f"dry_run={args.dry_run} force={args.force}"
     )
     print(f"Scanning {len(manifest_paths)} manifests in {pipeline_dir}")
@@ -190,8 +187,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             fetched = collect_run_metrics(
                 manifest=manifest,
-                project=args.project,
-                entity=args.entity,
+                artifacts_root=artifacts_root,
+                project_root=_PROJECT_ROOT,
             )
         except MetricsBackfillError as exc:
             print(f"  fail: {exc}")
@@ -210,8 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             identity = collect_run_identity(
                 manifest=manifest,
-                project=args.project,
-                entity=args.entity,
+                artifacts_root=artifacts_root,
+                project_root=_PROJECT_ROOT,
             )
         except MetricsBackfillError as exc:
             print(f"  warn: identity backfill failed ({exc})")

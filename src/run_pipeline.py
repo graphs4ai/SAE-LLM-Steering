@@ -19,6 +19,10 @@ from utils.experiment_ids import (
     make_run_id,
 )
 from utils.intervention_hooks import DEFAULT_LAST_K, DEFAULT_SCOPE, assert_scope
+from utils.local_artifacts import (
+    artifact_exists,
+    resolve_artifacts_root,
+)
 from utils.metrics_backfill import (
     NULL_METRICS,
     MetricsBackfillError,
@@ -123,6 +127,8 @@ def _build_commands(
     n_trials: int,
     stages: DictConfig,
     include_baseline_ipi: bool,
+    include_extract: bool,
+    include_feature_selection: bool,
     artifact_names: dict[str, str],
     intervention_scope: str,
     intervention_last_k: int,
@@ -130,6 +136,7 @@ def _build_commands(
     bounds_multiplier: float,
     resolved: ResolvedSeeds,
     cfg: DictConfig,
+    force: bool = False,
 ) -> list[str]:
     """
     Compose stage commands with explicit Hydra overrides for every artifact
@@ -138,8 +145,9 @@ def _build_commands(
     needs to guess (and stale defaults in config/model/*.yaml cannot leak in).
 
     `artifact_names` keys: activations, feature_ranking, multipliers,
-    ipi_baseline, ipi_intervened. Values are bare names (no
-    entity/project prefix) — wandb resolves them in the active run's project.
+    ipi_baseline, ipi_intervened. Values are bare names (no aliases).
+    Extract/rank are gated by ``include_extract`` / ``include_feature_selection``
+    so the planner can skip redundant or already-cached shared stages.
     """
     activations_name = artifact_names["activations"]
     feature_ranking_name = artifact_names["feature_ranking"]
@@ -147,12 +155,10 @@ def _build_commands(
     ipi_baseline_name = artifact_names["ipi_baseline"]
     ipi_intervened_name = artifact_names["ipi_intervened"]
 
-    activations_ref = f"{activations_name}:latest"
-    feature_ranking_ref = f"{feature_ranking_name}:latest"
-    multipliers_ref = f"{multipliers_name}:latest"
     seed_args = seed_cli_overrides(resolved)
     experiment_prefix = _experiment_cli_prefix(cfg)
     model_stage_args = _model_stage_cli_overrides(sae_width, bounds_multiplier)
+    force_arg = "pipeline.force=true " if force else ""
 
     intervention_args = (
         f"intervention.intervention_scope={intervention_scope} "
@@ -160,22 +166,24 @@ def _build_commands(
     )
 
     cmds: list[str] = []
-    if stages.get("extract_activations", False):
+    if stages.get("extract_activations", False) and include_extract:
         cmds.append(
             "python src/extract_activations.py "
             f"{experiment_prefix}"
+            f"{force_arg}"
             f"model={model_cfg_name} "
             f"{model_stage_args}"
             f"artifacts.activations={activations_name} "
             f"{seed_args}"
         )
-    if stages.get("feature_selection", False):
+    if stages.get("feature_selection", False) and include_feature_selection:
         cmds.append(
             "python src/select_sae_features.py "
             f"{experiment_prefix}"
+            f"{force_arg}"
             f"model={model_cfg_name} "
             f"{_sae_width_cli_override(sae_width)}"
-            f"artifacts.activations={activations_ref} "
+            f"artifacts.activations={activations_name} "
             f"artifacts.feature_ranking={feature_ranking_name} "
             f"{seed_args}"
         )
@@ -183,13 +191,14 @@ def _build_commands(
         cmds.append(
             "python src/optimize_sae_steering.py "
             f"{experiment_prefix}"
+            f"{force_arg}"
             f"model={model_cfg_name} "
             f"{model_stage_args}"
             f"optimization.direction={direction} "
             f"optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
             f"{intervention_args}"
-            f"artifacts.feature_ranking={feature_ranking_ref} "
+            f"artifacts.feature_ranking={feature_ranking_name} "
             f"artifacts.multipliers={multipliers_name} "
             f"{seed_args}"
         )
@@ -197,6 +206,7 @@ def _build_commands(
         cmds.append(
             "python src/ipi_eval.py "
             f"{experiment_prefix}"
+            f"{force_arg}"
             f"model={model_cfg_name} "
             f"{_sae_width_cli_override(sae_width)}"
             f"ipi.condition=baseline "
@@ -209,26 +219,49 @@ def _build_commands(
         cmds.append(
             "python src/ipi_eval.py "
             f"{experiment_prefix}"
+            f"{force_arg}"
             f"model={model_cfg_name} "
             f"{model_stage_args}"
             f"ipi.condition=intervened "
             f"optimization.direction={direction} optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
             f"{intervention_args}"
-            f"artifacts.multipliers={multipliers_ref} "
+            f"artifacts.multipliers={multipliers_name} "
             f"artifacts.ipi_intervened={ipi_intervened_name} "
             f"{seed_args}"
         )
     if stages.get("poeta", False):
         cmds.append(
             f"python src/poeta_evaluator.py {experiment_prefix}"
+            f"{force_arg}"
             f"model={model_cfg_name} "
             f"{_sae_width_cli_override(sae_width)}"
-            f"artifacts.multipliers={multipliers_ref} "
+            f"artifacts.multipliers={multipliers_name} "
             f"{intervention_args}"
             f"{seed_args}"
         )
     return cmds
+
+
+def _should_schedule_shared_stage(
+    name: str,
+    scheduled: set[str],
+    *,
+    force: bool,
+    exists: bool,
+) -> bool:
+    """Decide whether to schedule a shared extract/rank stage for ``name``.
+
+    Within one planner process, each artifact name is scheduled at most once.
+    Across runs, an existing local artifact is reused unless ``force`` is set.
+    """
+    if name in scheduled:
+        return False
+    if not force and exists:
+        scheduled.add(name)
+        return False
+    scheduled.add(name)
+    return True
 
 
 def _write_manifest(manifest_path: Path, payload: dict[str, Any]) -> None:
@@ -273,8 +306,7 @@ def _execute_job_commands(
     working_directory: Path,
     manifest_path: Path,
     manifest: dict[str, Any],
-    wandb_project: str | None,
-    wandb_entity: str | None,
+    artifacts_root: Path,
 ) -> None:
     running_manifest = dict(manifest)
     running_manifest["status"] = "running"
@@ -295,8 +327,8 @@ def _execute_job_commands(
 
     completed_manifest["metrics"] = _resolve_completion_metrics(
         manifest=running_manifest,
-        wandb_project=wandb_project,
-        wandb_entity=wandb_entity,
+        artifacts_root=artifacts_root,
+        project_root=working_directory,
         existing_metrics=running_manifest.get("metrics"),
     )
 
@@ -305,18 +337,16 @@ def _execute_job_commands(
 
 def _resolve_completion_metrics(
     manifest: dict[str, Any],
-    wandb_project: str | None,
-    wandb_entity: str | None,
+    artifacts_root: Path,
+    project_root: Path,
     existing_metrics: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """
     Best-effort metric write-back after a successful execution.
 
     Failures here must not mark the run as failed: the heavy work already
-    succeeded and the metric values can be reconstructed later via
-    `src/backfill_manifests.py`. We log a warning, fall back to the existing
-    metrics block (or nulls), and let the caller persist the manifest as
-    `completed`.
+    succeeded. We log a warning, fall back to the existing metrics block
+    (or nulls), and let the caller persist the manifest as `completed`.
     """
     base = dict(_null_metrics())
     if existing_metrics:
@@ -324,18 +354,11 @@ def _resolve_completion_metrics(
             if existing_metrics.get(key) is not None:
                 base[key] = existing_metrics[key]
 
-    if not wandb_project:
-        print(
-            "  metrics: skipped write-back (wandb.project not configured); "
-            "run src/backfill_manifests.py later to fill the manifest."
-        )
-        return base
-
     try:
         fetched = collect_run_metrics(
             manifest=manifest,
-            project=wandb_project,
-            entity=wandb_entity,
+            artifacts_root=artifacts_root,
+            project_root=project_root,
         )
     except MetricsBackfillError as exc:
         print(f"  metrics: write-back failed ({exc}); manifest left with nulls.")
@@ -348,7 +371,7 @@ def _resolve_completion_metrics(
         if value is not None:
             base[key] = value
 
-    print("  metrics: written back from W&B")
+    print("  metrics: written back from local artifacts")
     return base
 
 
@@ -418,12 +441,13 @@ def _plan_matrix_for_seed(
     output_root: Path,
     dry_run: bool,
     project_root: Path,
-    wandb_project: str | None,
-    wandb_entity: str | None,
+    artifacts_root: Path,
     resume: bool,
     force: bool,
     skip_existing: bool,
     scheduled_baseline_keys: set[tuple[Any, ...]],
+    scheduled_activation_keys: set[str],
+    scheduled_ranking_keys: set[str],
     counters: dict[str, int],
 ) -> None:
     """Plan (and optionally execute) the model x direction x top_k x n_trials x
@@ -431,8 +455,10 @@ def _plan_matrix_for_seed(
 
     Everything seed-specific arrives via ``resolved``; the function is otherwise
     identical to the legacy single-seed body. Shared mutable state
-    (``scheduled_baseline_keys`` for baseline reuse and ``counters`` for the
-    plan summary) is threaded in so it accumulates across seed iterations.
+    (``scheduled_baseline_keys`` for baseline reuse,
+    ``scheduled_activation_keys`` / ``scheduled_ranking_keys`` for extract/rank
+    dedupe, and ``counters`` for the plan summary) is threaded in so it
+    accumulates across seed iterations.
     """
     optimization_seed = resolved.optimization
     baseline_seed = resolved.ipi
@@ -480,10 +506,6 @@ def _plan_matrix_for_seed(
                                     continue
 
                                 try:
-                                    # Bare artifact names (no `:alias` suffix). Used both
-                                    # as outputs (passed to scripts via artifacts.*) and,
-                                    # with `:latest` appended, as inputs to downstream
-                                    # stages.
                                     artifact_names = {
                                         "activations": make_activation_artifact_name(
                                             model_name=model_cfg_name,
@@ -529,7 +551,36 @@ def _plan_matrix_for_seed(
                                             bounds_multiplier=bounds_multiplier,
                                         ),
                                     }
-                                    artifacts = {k: f"{v}:latest" for k, v in artifact_names.items()}
+
+                                    activations_name = artifact_names["activations"]
+                                    ranking_name = artifact_names["feature_ranking"]
+
+                                    include_extract = False
+                                    if experiment.stages.get("extract_activations", False):
+                                        include_extract = _should_schedule_shared_stage(
+                                            activations_name,
+                                            scheduled_activation_keys,
+                                            force=force,
+                                            exists=artifact_exists(
+                                                activations_name,
+                                                required_files=["activations.parquet"],
+                                                root=artifacts_root,
+                                            ),
+                                        )
+
+                                    include_feature_selection = False
+                                    if experiment.stages.get("feature_selection", False):
+                                        include_feature_selection = _should_schedule_shared_stage(
+                                            ranking_name,
+                                            scheduled_ranking_keys,
+                                            force=force,
+                                            exists=artifact_exists(
+                                                ranking_name,
+                                                required_files=["feature_ranking.json"],
+                                                root=artifacts_root,
+                                            ),
+                                        )
+
                                     commands = _build_commands(
                                         model_cfg_name=model_cfg_name,
                                         direction=direction,
@@ -537,6 +588,8 @@ def _plan_matrix_for_seed(
                                         n_trials=n_trials,
                                         stages=experiment.stages,
                                         include_baseline_ipi=include_baseline_ipi,
+                                        include_extract=include_extract,
+                                        include_feature_selection=include_feature_selection,
                                         artifact_names=artifact_names,
                                         intervention_scope=scope,
                                         intervention_last_k=intervention_last_k,
@@ -544,6 +597,7 @@ def _plan_matrix_for_seed(
                                         bounds_multiplier=bounds_multiplier,
                                         resolved=resolved,
                                         cfg=cfg,
+                                        force=force,
                                     )
                                     manifest = {
                                         "run_id": run_id,
@@ -560,7 +614,7 @@ def _plan_matrix_for_seed(
                                         "intervention_scope": scope,
                                         "intervention_last_k": intervention_last_k,
                                         "commands": commands,
-                                        "artifacts": artifacts,
+                                        "artifacts": dict(artifact_names),
                                         "metrics": _null_metrics(),
                                         "error": None,
                                     }
@@ -585,6 +639,10 @@ def _plan_matrix_for_seed(
                                             scheduled_baseline_keys.add(baseline_key)
                                         else:
                                             print("  baseline IPI: reused (not rescheduled)")
+                                        if not include_extract and experiment.stages.get("extract_activations", False):
+                                            print(f"  extract: reused/cached ({activations_name})")
+                                        if not include_feature_selection and experiment.stages.get("feature_selection", False):
+                                            print(f"  ranking: reused/cached ({ranking_name})")
                                         continue
 
                                     _write_manifest(manifest_path, manifest)
@@ -601,6 +659,10 @@ def _plan_matrix_for_seed(
                                         scheduled_baseline_keys.add(baseline_key)
                                     else:
                                         print("  baseline IPI: reused (not rescheduled)")
+                                    if not include_extract and experiment.stages.get("extract_activations", False):
+                                        print(f"  extract: reused/cached ({activations_name})")
+                                    if not include_feature_selection and experiment.stages.get("feature_selection", False):
+                                        print(f"  ranking: reused/cached ({ranking_name})")
 
                                     if not dry_run:
                                         _execute_job_commands(
@@ -608,8 +670,7 @@ def _plan_matrix_for_seed(
                                             working_directory=project_root,
                                             manifest_path=manifest_path,
                                             manifest=manifest,
-                                            wandb_project=wandb_project,
-                                            wandb_entity=wandb_entity,
+                                            artifacts_root=artifacts_root,
                                         )
                                         print("  execution: completed")
                                 except Exception as exc:
@@ -683,10 +744,7 @@ def main(cfg: DictConfig) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     dry_run = bool(cfg.pipeline.get("dry_run", True))
     project_root = Path(hydra.utils.get_original_cwd())
-
-    wandb_cfg = cfg.get("wandb", {}) or {}
-    wandb_project = wandb_cfg.get("project")
-    wandb_entity = wandb_cfg.get("entity")
+    artifacts_root = resolve_artifacts_root(cfg=cfg, project_root=project_root)
 
     seed_sweep_display = (
         "default (no sweep)"
@@ -697,6 +755,7 @@ def main(cfg: DictConfig) -> None:
     print("=" * 70)
     print(f"PIPELINE PLAN: {experiment.name}")
     print(f"runs_subdir={runs_subdir} (manifests under {output_root}/)")
+    print(f"artifacts_root={artifacts_root}")
     print(f"seed sweep: {seed_sweep_display}")
     print(f"sae_width sweep: {', '.join(sae_widths)}")
     print(
@@ -716,6 +775,8 @@ def main(cfg: DictConfig) -> None:
     # Shared across seeds: the baseline-reuse key already encodes the ipi seed,
     # so distinct seeds get distinct baselines while same-seed jobs still reuse.
     scheduled_baseline_keys: set[tuple[Any, ...]] = set()
+    scheduled_activation_keys: set[str] = set()
+    scheduled_ranking_keys: set[str] = set()
 
     for seed_override in seed_values:
         resolved = resolve_seeds_from_cfg(cfg, seed_override)
@@ -738,12 +799,13 @@ def main(cfg: DictConfig) -> None:
             output_root=output_root,
             dry_run=dry_run,
             project_root=project_root,
-            wandb_project=wandb_project,
-            wandb_entity=wandb_entity,
+            artifacts_root=artifacts_root,
             resume=resume,
             force=force,
             skip_existing=skip_existing,
             scheduled_baseline_keys=scheduled_baseline_keys,
+            scheduled_activation_keys=scheduled_activation_keys,
+            scheduled_ranking_keys=scheduled_ranking_keys,
             counters=counters,
         )
 

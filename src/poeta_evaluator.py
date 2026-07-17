@@ -2,10 +2,8 @@ from model_factory import get_wrapper_class
 import os
 import sys
 import json
-import glob
 import torch
 import logging
-import wandb
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Iterable, Tuple
 from pathlib import Path
@@ -13,6 +11,14 @@ from contextlib import contextmanager
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
+
+from utils.local_artifacts import (
+    find_file,
+    normalize_artifact_name,
+    resolve_artifacts_root,
+    should_force,
+    write_artifact,
+)
 
 
 class TeeLogger:
@@ -294,8 +300,6 @@ def run_poeta_evaluation(
     limit: Optional[int] = None,
     output_path: Optional[str] = None,
     description_dict_path: Optional[str] = None,
-    log_to_wandb: bool = False,
-    wandb_prefix: str = "",
     dtype: Optional[torch.dtype] = None,
     evaluation_variant: str = "baseline",
     multiplier_source: str = "none",
@@ -318,8 +322,6 @@ def run_poeta_evaluation(
         limit: Limit number of examples per task (for testing)
         output_path: Path to save results JSON
         description_dict_path: Path to task description JSON
-        log_to_wandb: Whether to log results to wandb
-        wandb_prefix: Prefix for wandb metric names
 
     Returns:
         Dictionary containing evaluation results
@@ -460,52 +462,6 @@ def run_poeta_evaluation(
     print("="*60)
     print(evaluator.make_table(results))
 
-    # Log to wandb if requested
-    if log_to_wandb and wandb.run is not None:
-        wandb_metrics = {}
-        table_rows = []
-
-        # Log evaluation results
-        for task_name, task_metrics in results.get('results', {}).items():
-            if isinstance(task_metrics, dict):
-                for key, value in task_metrics.items():
-                    # Handle nested prompt_mode structure (e.g. "dynamic-random": {"acc": 1.0})
-                    if isinstance(value, dict):
-                        for metric, val in value.items():
-                            if isinstance(val, (int, float)):
-                                wandb_metrics[f"{wandb_prefix}{task_name}/{metric}"] = val
-                                table_rows.append(
-                                    [task_name, key, metric, val])
-                    # Handle direct metric structure
-                    elif isinstance(value, (int, float)):
-                        wandb_metrics[f"{wandb_prefix}{task_name}/{key}"] = value
-                        table_rows.append([task_name, "default", key, value])
-
-        # Create and add table
-        if table_rows:
-            table = wandb.Table(
-                columns=["Task", "Prompt Mode", "Metric", "Value"], data=table_rows)
-            wandb_metrics[f"{wandb_prefix}results_table"] = table
-
-        # Log outputs table
-        if 'outputs' in results:
-            output_rows = []
-            for task_name, task_outputs in results['outputs'].items():
-                for prompt_mode, doc_outputs in task_outputs.items():
-                    for doc_id, preds in doc_outputs.items():
-                        pred_str = str(preds)
-                        if isinstance(preds, list) and len(preds) == 1:
-                            pred_str = str(preds[0])
-                        output_rows.append(
-                            [task_name, prompt_mode, str(doc_id), pred_str])
-
-            if output_rows:
-                out_table = wandb.Table(
-                    columns=["Task", "Prompt Mode", "Doc ID", "Prediction"], data=output_rows)
-                wandb_metrics[f"{wandb_prefix}model_outputs"] = out_table
-
-        wandb.log(wandb_metrics)
-
     return serializable_results
 
 
@@ -514,7 +470,7 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
     Load activation multipliers using the same logic as ipi_eval.py.
 
     Resolution order:
-      1. artifacts.multipliers (W&B artifact)
+      1. artifacts.multipliers (local artifact)
       2. ipi.activation_multipliers (inline config)
       3. activation_multipliers (top-level config, legacy)
 
@@ -535,6 +491,10 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
         evaluation_variant = "baseline"
 
     multiplier_artifact_name = artifacts_cfg.get('multipliers', None)
+    if multiplier_artifact_name:
+        multiplier_artifact_name = normalize_artifact_name(
+            str(multiplier_artifact_name)
+        )
 
     provenance = {
         "source": "none",
@@ -545,20 +505,17 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
     if evaluation_variant == "baseline":
         return None, provenance
 
-    # --- Option 1: Load from W&B artifact ---
+    # --- Option 1: Load from local artifact ---
     if multiplier_artifact_name:
-        print(f"\nFetching multiplier artifact: {multiplier_artifact_name}")
-        artifact = wandb.use_artifact(multiplier_artifact_name)
-        artifact_dir = artifact.download()
-
-        # Find optimization results JSON file
-        json_files = glob.glob(os.path.join(
-            artifact_dir, "optimization_results_*.json"))
-        if not json_files:
-            raise FileNotFoundError(
-                f"No optimization_results_*.json found in artifact: {artifact_dir}")
-
-        results_path = json_files[0]
+        print(f"\nLoading multiplier artifact: {multiplier_artifact_name}")
+        artifacts_root = resolve_artifacts_root(
+            cfg=cfg, project_root=PROJECT_PATH
+        )
+        results_path = find_file(
+            multiplier_artifact_name,
+            "optimization_results_*.json",
+            root=artifacts_root,
+        )
         with open(results_path, 'r', encoding='utf-8') as f:
             opt_results = json.load(f)
 
@@ -606,7 +563,7 @@ def main(cfg: DictConfig):
         - poeta.limit: Example limit (null for full evaluation)
         - poeta.output_dir: Where to save results
         - poeta.batch_size / poeta.device / poeta.prompt_modes
-        - artifacts.multipliers: W&B artifact with optimized multipliers
+        - artifacts.multipliers: local artifact with optimized multipliers
         - ipi.activation_multipliers: Inline multipliers dict
         - activation_multipliers: Legacy inline multipliers dict
     """
@@ -624,12 +581,8 @@ def main(cfg: DictConfig):
     resolved = resolve_seeds_from_cfg(cfg)
     log_resolved_seeds(resolved, prefix="poeta_evaluator")
     poeta_seed = resolved.poeta
-
-    wandb_cfg = cfg.get('wandb', {})
-    if wandb_cfg is None:
-        wandb_cfg = {}
-
-    log_to_wandb = wandb_cfg.get('log_to_wandb', False)
+    force = should_force(cfg)
+    artifacts_root = resolve_artifacts_root(cfg=cfg, project_root=PROJECT_PATH)
 
     # Get model configuration (support both old and new config format)
     model_cfg = cfg.get('model', {})
@@ -657,42 +610,12 @@ def main(cfg: DictConfig):
             f"Invalid evaluation_variant='{evaluation_variant}'. Expected one of: baseline, maximize, minimize."
         )
 
-    # Prepare wandb config metadata
     artifacts_cfg = cfg.get('artifacts', {}) or {}
     multiplier_artifact_name = artifacts_cfg.get('multipliers', None)
-
-    wandb_config = OmegaConf.to_container(cfg, resolve=True)
-    wandb_config.update({
-        'evaluation_variant': evaluation_variant,
-        'multiplier_source': 'artifact' if multiplier_artifact_name else 'config_or_none',
-        'multiplier_artifact_name': multiplier_artifact_name,
-        'poeta_seed': poeta_seed,
-        'resolved_seeds': resolved_seeds_to_dict(resolved),
-    })
-
-    if log_to_wandb:
-        wandb.init(
-            project=wandb_cfg.get('project', 'activation-stance-classifier'),
-            entity=wandb_cfg.get('entity', None),
-            name=wandb_cfg.get('run_name', None),
-            job_type="poeta_eval",
-            tags=list(wandb_cfg.get('tags', [])),
-            config=wandb_config,
+    if multiplier_artifact_name:
+        multiplier_artifact_name = normalize_artifact_name(
+            str(multiplier_artifact_name)
         )
-    else:
-        # Initialize wandb in offline/disabled mode so wandb.use_artifact still works
-        # when loading multipliers from artifacts
-        if multiplier_artifact_name:
-            wandb.init(
-                project=wandb_cfg.get(
-                    'project', 'activation-stance-classifier'),
-                entity=wandb_cfg.get('entity', None),
-                name=wandb_cfg.get('run_name', None),
-                job_type="poeta_eval",
-                config=wandb_config,
-            )
-            # Override: we need wandb for artifact loading, so enable logging
-            log_to_wandb = True
 
     # Load activation multipliers (same logic as ipi_eval.py)
     activation_multipliers, multiplier_provenance = _load_multipliers_from_config(
@@ -770,8 +693,6 @@ def main(cfg: DictConfig):
             limit=poeta_limit,
             output_path=output_path,
             description_dict_path=poeta_description_dict_path,
-            log_to_wandb=log_to_wandb,
-            wandb_prefix=f"variant/{evaluation_variant}/",
             dtype=dtype,
             evaluation_variant=evaluation_variant,
             multiplier_source=multiplier_source,
@@ -814,22 +735,18 @@ def main(cfg: DictConfig):
     with open(config_path, 'w') as f:
         json.dump(config_data, f, indent=2)
 
-    # Log single-eval artifact to W&B
-    if log_to_wandb and wandb.run is not None:
-        _log_single_eval_artifact(
-            run_dir=str(run_dir),
-            results=results,
-            eval_type=eval_type,
-            evaluation_variant=evaluation_variant,
-            model_name=model_name,
-            multiplier_source=multiplier_source,
-            multiplier_artifact_name=multiplier_artifact_name,
-            n_multipliers=len(activation_multipliers or {}),
-        )
-
-    # Finish W&B run
-    if wandb.run is not None:
-        wandb.finish()
+    _log_single_eval_artifact(
+        run_dir=str(run_dir),
+        results=results,
+        eval_type=eval_type,
+        evaluation_variant=evaluation_variant,
+        model_name=model_name,
+        multiplier_source=multiplier_source,
+        multiplier_artifact_name=multiplier_artifact_name,
+        n_multipliers=len(activation_multipliers or {}),
+        artifacts_root=artifacts_root,
+        force=force,
+    )
 
     return results
 
@@ -843,41 +760,34 @@ def _log_single_eval_artifact(
     multiplier_source: str,
     multiplier_artifact_name: Optional[str],
     n_multipliers: int,
+    artifacts_root: Path,
+    force: bool = False,
 ):
-    """Log a single PoETa evaluation run as a W&B artifact."""
+    """Persist a single PoETa evaluation run as a local artifact."""
     artifact_name = f"poeta-{evaluation_variant}-{eval_type}-results"
-    artifact = wandb.Artifact(
-        name=artifact_name,
-        type="poeta-evaluation",
-        description=f"PoETa V2 evaluation results ({evaluation_variant}/{eval_type})",
-        metadata={
-            'model_name': model_name,
-            'eval_type': eval_type,
-            'evaluation_variant': evaluation_variant,
-            'multiplier_source': multiplier_source,
-            'multiplier_artifact_name': multiplier_artifact_name,
-            'n_multipliers': n_multipliers,
-        }
-    )
-
-    # Add all JSON files in the run directory
     run_path = Path(run_dir)
+    files: Dict[str, str] = {}
     for json_file in run_path.glob("*.json"):
-        artifact.add_file(str(json_file))
+        files[json_file.name] = str(json_file)
     for log_file in run_path.glob("*.log"):
-        artifact.add_file(str(log_file))
+        files[log_file.name] = str(log_file)
 
-    wandb.log_artifact(artifact)
-    print(f"\nPoETa artifact logged to W&B: {artifact_name}")
-
-    # Log summary metrics
-    wandb.summary.update({
+    metadata = {
+        'model_name': model_name,
         'eval_type': eval_type,
         'evaluation_variant': evaluation_variant,
-        'model_name': model_name,
-        'n_multipliers': n_multipliers,
         'multiplier_source': multiplier_source,
-    })
+        'multiplier_artifact_name': multiplier_artifact_name,
+        'n_multipliers': n_multipliers,
+    }
+    artifact_path = write_artifact(
+        artifact_name,
+        files,
+        metadata,
+        root=artifacts_root,
+        force=force,
+    )
+    print(f"\nPoETa artifact written: {artifact_path}")
 
 
 if __name__ == "__main__":

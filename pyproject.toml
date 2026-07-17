@@ -26,7 +26,6 @@ dependencies = [
     "transformer-lens",
     "transformers",
     "umap-learn>=0.5.6",
-    "wandb",
 ]
 
 [tool.uv]

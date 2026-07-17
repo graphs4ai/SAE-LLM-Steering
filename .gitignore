@@ -2,7 +2,6 @@
 data/
 runs/
 __pycache__/
-wandb/
 ._*
 .DS_Store
 artifacts/
