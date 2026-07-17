@@ -5,8 +5,6 @@ __pycache__/
 wandb/
 ._*
 .DS_Store
-config/
-config_bak/
 artifacts/
 *.sbatch
 slurm_outputs/

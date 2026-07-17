@@ -1,0 +1,45 @@
+name: gemma_scope_k20
+split_id: three_way_plus_holdout_v1
+# Seeds to run (one full matrix per seed). One-element list = single run.
+seeds: [1, 10, 20, 30, 42]
+# Manifest root: runs/<runs_subdir>/
+runs_subdir: gemma_scope_l17_l22-multiseed
+
+models:
+  - gemma-3-4b
+
+directions:
+  - maximize
+  - minimize
+
+# Optimize additive decoded-delta coefficients over the top-20 SAE latents
+# ranked by mean activation (select_sae_features method: mean_activation).
+# feature_selection.ranking_top_n (default 256) must be >= this value.
+feature_counts:
+  - 60
+
+trial_grid:
+  "60": [1000]
+
+# SAE width and optimization bounds axes. Each combination is re-extracted,
+# re-ranked, re-optimized, and re-evaluated independently.
+sae_widths:
+  - 65k
+  # - 262k
+
+bounds_multipliers:
+  # - 1.5
+  - 3.0
+
+scopes:
+  - prompt_all
+
+intervention_last_k: 3
+
+stages:
+  extract_activations: true
+  feature_selection: true
+  optimization: true
+  ipi_baseline: true
+  ipi_intervened: true
+  poeta: false

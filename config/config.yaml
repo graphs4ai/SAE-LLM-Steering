@@ -1,0 +1,123 @@
+defaults:
+  - _self_
+  - model: null  # Leaves the model group blank by default
+  - experiment: null  # Optional experiment matrix for pipeline orchestration
+
+# Canonical global seed (stage overrides default to null and inherit this).
+seed: 42
+
+# Data paths (datasets only — artifact refs live under artifacts.*)
+data:
+  split_id: null
+  feature_selection_dataset: "resources/split_FS.csv"
+  optimization_dataset: "resources/split_optim.csv"
+  validation_dataset: "resources/ipi_questions_val.csv"
+  ipi_test_dataset: "resources/ipi_questions_test.csv"
+
+# SAE feature selection settings (implemented in src/select_sae_features.py).
+feature_selection:
+  enabled: true
+  method: paired_contrastive
+  ranking_top_n: 256
+  min_active_rate: 0.1
+  seed: null
+
+extraction:
+  seed: null
+  prompt_mode: ipi_chat
+  # Gemma Scope 2 SAE defaults (used by gemma wrapper; ignored by others).
+  sae_width: "65k"
+  sae_l0: "medium"
+  sae_release: "gemma-scope-2-4b-it-res"
+
+# Shared intervention knobs for optimize + IPI (single source of truth).
+intervention:
+  decoder_normalization: raw
+  # Intervention mechanism: "decoder_delta_additive" (static per-layer vector,
+  # sum_j alpha_j * W_dec[j] added identically at every masked position) or
+  # "latent_clamp_additive" (per-token: z = sae.encode(x), z'_j = ReLU(z_j +
+  # alpha_j), delta = (z' - z) @ W_dec). See src/gemma_3_wrapper.py.
+  edit_mode: latent_clamp_additive
+  # Intervention scope used during optimize and IPI generation. See
+  # `src/utils/intervention_hooks.py`. When a multipliers artifact is loaded,
+  # its metadata overrides these values.
+  intervention_scope: prompt_without_buffer
+  intervention_last_k: 3
+
+ipi:
+  condition: baseline
+  eval_split: validation
+  # When true, permute A–E -> {-2..2} deterministically from option_mapping_seed
+  # (or resolved ipi seed). Same mapping for all questions in a run.
+  seed_dependent_option_scores: false
+  option_mapping_seed: null
+  prompt_template_version: ae_options_v1
+  parser_version: ae_options_v1
+  temperature: 0
+  decoding_strategy: greedy
+  language: "pt"
+  use_chat_format: true
+  max_new_tokens: 10
+  experiment_name: null
+  activation_multipliers: null
+  seed: null
+
+optimization:
+  direction: minimize
+  top_k: 80
+  n_trials: 500
+  seed: null
+  fast_sample_seed: null
+  objective_mode: soft_ipi
+  validation_fraction: null
+  split_seed: null
+  # Manual SAE feature list fallback when artifacts.feature_ranking is unset.
+  target_features: null
+  # When true, per-feature Optuna bounds are derived from mean_left/mean_right
+  # feature-selection statistics instead of the shared `bounds` box below
+  # (see compute_latent_clamp_bounds in src/utils/sae_steering.py). Only valid
+  # with intervention.edit_mode: latent_clamp_additive.
+  auto_bounds: true
+  bounds_multiplier: 3.0
+
+poeta:
+  seed: null
+
+# Stage I/O artifact names (inputs and outputs). Pipeline / CLI set these.
+artifacts:
+  activations: null
+  feature_ranking: null
+  multipliers: null
+  ipi_baseline: null
+  ipi_intervened: null
+
+# Baseline question-score variance sweeps (see config/experiment/qvar_*.yaml).
+# seed_mode shortnames: conv | order | joint
+question_score_variance:
+  seed_mode: joint
+  fixed_runtime_seed: 1
+  option_mapping_seeds: null
+  questions_csv: null
+  score_scale: alternative
+  max_questions: null
+  output_dir: runs/question_score_variance
+
+pipeline:
+  dry_run: false
+  resume: true
+  force: false
+  skip_existing: true
+  # Manifest/summary root is runs/<runs_subdir>/ (default: pipeline). Overridden by
+  # experiment.runs_subdir when set in an experiment config.
+  runs_subdir: null
+
+# Hydra output directory
+hydra:
+  run:
+    dir: runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# W&B tracking
+wandb:
+  project: "SAE-LLM-Steering"
+  run_name: null
+  log_to_wandb: true
