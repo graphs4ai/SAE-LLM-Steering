@@ -15,10 +15,12 @@ _REQUIRED_OPTIMIZATION_METADATA = {
     "n_trials",
     "seed",
     "objective_mode",
-    "feature_artifact_name",
     "optimization_dataset",
     "validation_dataset",
 }
+
+# New artifacts write feature_ranking; older W&B artifacts used feature_artifact_name.
+_FEATURE_RANKING_METADATA_KEYS = ("feature_ranking", "feature_artifact_name")
 
 
 def _is_optimization_metadata(metadata: dict[str, Any]) -> bool:
@@ -31,6 +33,11 @@ def _validate_optimization_metadata(metadata: dict[str, Any]) -> None:
         raise ValueError(
             "Optimization artifact metadata is missing required keys: "
             + ", ".join(missing)
+        )
+    if not any(key in metadata for key in _FEATURE_RANKING_METADATA_KEYS):
+        raise ValueError(
+            "Optimization artifact metadata is missing required keys: "
+            + " or ".join(_FEATURE_RANKING_METADATA_KEYS)
         )
 
 

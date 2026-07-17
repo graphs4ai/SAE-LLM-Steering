@@ -235,6 +235,7 @@ def _fetch_likert_metrics(
 
     filters = {
         "$or": [
+            {"config.artifacts.multipliers": multipliers_ref},
             {"config.multiplier_artifact_name": multipliers_ref},
             {"config.ipi.multiplier_artifact_name": multipliers_ref},
             {"config.ipi_eval.multiplier_artifact_name": multipliers_ref},

@@ -690,6 +690,8 @@ def main(cfg: DictConfig):
 
     wandb_cfg = cfg.get('wandb', {})
     ipi_cfg = _ipi_cfg(cfg)
+    intervention_cfg = cfg.get("intervention", {}) or {}
+    artifacts_cfg = cfg.get("artifacts", {}) or {}
     language = str(ipi_cfg.get('language', 'pt'))
 
     option_scores = resolve_option_scores(cfg)
@@ -697,22 +699,29 @@ def main(cfg: DictConfig):
         option_scores, source="ipi_eval_main", language=language
     )
 
-    multiplier_artifact_name = ipi_cfg.get('multiplier_artifact_name', None)
+    multiplier_artifact_name = artifacts_cfg.get('multipliers', None)
 
-    intervention_scope = str(ipi_cfg.get('intervention_scope', DEFAULT_SCOPE))
-    intervention_last_k = int(ipi_cfg.get('intervention_last_k', DEFAULT_LAST_K))
-    decoder_normalization = str(
-        ipi_cfg.get("decoder_normalization", DEFAULT_DECODER_NORMALIZATION)
+    intervention_scope = str(
+        intervention_cfg.get('intervention_scope', DEFAULT_SCOPE)
     )
-    edit_mode = str(ipi_cfg.get("edit_mode", DEFAULT_EDIT_MODE))
+    intervention_last_k = int(
+        intervention_cfg.get('intervention_last_k', DEFAULT_LAST_K)
+    )
+    decoder_normalization = str(
+        intervention_cfg.get(
+            "decoder_normalization", DEFAULT_DECODER_NORMALIZATION
+        )
+    )
+    edit_mode = str(intervention_cfg.get("edit_mode", DEFAULT_EDIT_MODE))
     if edit_mode not in VALID_EDIT_MODES:
         raise ValueError(
-            f"Invalid ipi.edit_mode={edit_mode!r}. Expected one of {VALID_EDIT_MODES}."
+            f"Invalid intervention.edit_mode={edit_mode!r}. "
+            f"Expected one of {VALID_EDIT_MODES}."
         )
     assert_scope(intervention_scope)
     if intervention_last_k < 0:
         raise ValueError(
-            f"Invalid ipi.intervention_last_k={intervention_last_k!r}. "
+            f"Invalid intervention.intervention_last_k={intervention_last_k!r}. "
             f"Expected a non-negative integer."
         )
 
@@ -822,7 +831,7 @@ def main(cfg: DictConfig):
                 print(
                     f"WARNING: multipliers artifact was optimized with "
                     f"intervention_scope={artifact_scope!r}, but config has "
-                    f"ipi.intervention_scope={intervention_scope!r}. "
+                    f"intervention.intervention_scope={intervention_scope!r}. "
                     f"Overriding to {artifact_scope!r} to keep eval consistent."
                 )
             assert_scope(artifact_scope)
@@ -833,7 +842,7 @@ def main(cfg: DictConfig):
                 print(
                     f"WARNING: multipliers artifact was optimized with "
                     f"intervention_last_k={artifact_last_k_int}, but config "
-                    f"has ipi.intervention_last_k={intervention_last_k}. "
+                    f"has intervention.intervention_last_k={intervention_last_k}. "
                     f"Overriding to {artifact_last_k_int}."
                 )
             intervention_last_k = artifact_last_k_int
@@ -843,7 +852,7 @@ def main(cfg: DictConfig):
                 print(
                     f"WARNING: multipliers artifact was optimized with "
                     f"decoder_normalization={artifact_decoder_normalization!r}, but config has "
-                    f"ipi.decoder_normalization={decoder_normalization!r}. "
+                    f"intervention.decoder_normalization={decoder_normalization!r}. "
                     f"Overriding to {artifact_decoder_normalization!r}."
                 )
             decoder_normalization = artifact_decoder_normalization
@@ -854,7 +863,7 @@ def main(cfg: DictConfig):
                 print(
                     f"WARNING: multipliers artifact was optimized with "
                     f"edit_mode={artifact_edit_mode!r}, but config has "
-                    f"ipi.edit_mode={edit_mode!r}. "
+                    f"intervention.edit_mode={edit_mode!r}. "
                     f"Overriding to {artifact_edit_mode!r} to keep eval consistent."
                 )
             if artifact_edit_mode not in VALID_EDIT_MODES:
@@ -1037,7 +1046,7 @@ def main(cfg: DictConfig):
         # Create and log comparison artifact.
         artifacts_cfg = cfg.get("artifacts", {}) or {}
         intervened_artifact_name = (
-            artifacts_cfg.get("ipi_intervened_name") or "ipi-comparison-results"
+            artifacts_cfg.get("ipi_intervened") or "ipi-comparison-results"
         )
         comparison_artifact = wandb.Artifact(
             name=intervened_artifact_name,
@@ -1185,7 +1194,7 @@ def main(cfg: DictConfig):
         # Log baseline artifact.
         artifacts_cfg = cfg.get("artifacts", {}) or {}
         artifact_name = (
-            artifacts_cfg.get("ipi_baseline_name") or "ipi-baseline-results"
+            artifacts_cfg.get("ipi_baseline") or "ipi-baseline-results"
         )
         ipi_artifact = wandb.Artifact(
             name=artifact_name,

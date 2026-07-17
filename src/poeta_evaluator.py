@@ -514,7 +514,7 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
     Load activation multipliers using the same logic as ipi_eval.py.
 
     Resolution order:
-      1. ipi.multiplier_artifact_name (W&B artifact)
+      1. artifacts.multipliers (W&B artifact)
       2. ipi.activation_multipliers (inline config)
       3. activation_multipliers (top-level config, legacy)
 
@@ -527,13 +527,14 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
           - provenance metadata dict with source/artifact_name/variant
     """
     ipi_cfg = cfg.get('ipi', {}) or cfg.get('likert', {}) or {}
+    artifacts_cfg = cfg.get('artifacts', {}) or {}
 
     evaluation_variant = str(
         cfg.get('evaluation_variant', '') or '').strip().lower()
     if evaluation_variant not in {"baseline", "maximize", "minimize"}:
         evaluation_variant = "baseline"
 
-    multiplier_artifact_name = ipi_cfg.get('multiplier_artifact_name', None)
+    multiplier_artifact_name = artifacts_cfg.get('multipliers', None)
 
     provenance = {
         "source": "none",
@@ -589,13 +590,13 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
 
 
 # Hydra configuration for running from command line
-@hydra.main(config_path="../config", config_name="poeta_eval", version_base=None)
+@hydra.main(config_path="../config", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     """
     Main entry point for Hydra-based PoETa evaluation.
 
     Supports unified config files (e.g. gemma-3-4b.yaml) where intervention
-    multipliers are loaded from ipi.multiplier_artifact_name or
+    multipliers are loaded from artifacts.multipliers or
     ipi.activation_multipliers, following the same logic as ipi_eval.py.
 
     Config should contain:
@@ -605,7 +606,7 @@ def main(cfg: DictConfig):
         - poeta.limit: Example limit (null for full evaluation)
         - poeta.output_dir: Where to save results
         - poeta.batch_size / poeta.device / poeta.prompt_modes
-        - ipi.multiplier_artifact_name: W&B artifact with optimized multipliers
+        - artifacts.multipliers: W&B artifact with optimized multipliers
         - ipi.activation_multipliers: Inline multipliers dict
         - activation_multipliers: Legacy inline multipliers dict
     """
@@ -657,8 +658,8 @@ def main(cfg: DictConfig):
         )
 
     # Prepare wandb config metadata
-    ipi_cfg = cfg.get('ipi', {}) or cfg.get('likert', {}) or {}
-    multiplier_artifact_name = ipi_cfg.get('multiplier_artifact_name', None)
+    artifacts_cfg = cfg.get('artifacts', {}) or {}
+    multiplier_artifact_name = artifacts_cfg.get('multipliers', None)
 
     wandb_config = OmegaConf.to_container(cfg, resolve=True)
     wandb_config.update({

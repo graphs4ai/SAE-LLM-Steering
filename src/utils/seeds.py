@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -24,23 +23,14 @@ def _coerce_optional_int(value: Any) -> int | None:
 
 
 def global_seed_from_cfg(cfg: DictConfig | Mapping[str, Any]) -> int:
-    """Return the canonical global seed, with one-release random_state fallback."""
+    """Return the canonical global seed."""
     if isinstance(cfg, DictConfig):
         raw_global = cfg.get("seed")
-        raw_legacy = cfg.get("random_state")
     else:
         raw_global = cfg.get("seed") if hasattr(cfg, "get") else None
-        raw_legacy = cfg.get("random_state") if hasattr(cfg, "get") else None
 
     if not _is_null(raw_global):
         return int(raw_global)
-    if not _is_null(raw_legacy):
-        warnings.warn(
-            "Top-level random_state is deprecated; set seed: <int> in config.yaml.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return int(raw_legacy)
     raise ValueError(
         "Global seed is required. Set seed: <int> in config.yaml "
         "(or pass seed=<int> on the CLI)."
@@ -107,7 +97,6 @@ def _stage_seed(cfg: DictConfig, *keys: str) -> int | None:
 @dataclass(frozen=True)
 class ResolvedSeeds:
     global_seed: int
-    training: int
     feature_selection: int
     extraction: int
     optimization: int
@@ -135,10 +124,6 @@ def resolve_seeds_from_cfg(
     else:
         global_seed = global_seed_from_cfg(cfg)
 
-    training = resolve_seed(
-        global_seed,
-        _stage_seed(cfg, "training", "random_state"),
-    )
     feature_selection = resolve_seed(
         global_seed,
         _stage_seed(cfg, "feature_selection", "seed"),
@@ -164,7 +149,6 @@ def resolve_seeds_from_cfg(
 
     return ResolvedSeeds(
         global_seed=global_seed,
-        training=training,
         feature_selection=feature_selection,
         extraction=extraction,
         optimization=optimization,
@@ -179,7 +163,6 @@ def resolved_seeds_to_dict(resolved: ResolvedSeeds) -> dict[str, int | None]:
     """Audit map for manifests and W&B (resolved ints, not raw YAML nulls)."""
     return {
         "global": resolved.global_seed,
-        "training": resolved.training,
         "feature_selection": resolved.feature_selection,
         "extraction": resolved.extraction,
         "optimization": resolved.optimization,
@@ -202,7 +185,6 @@ def seed_cli_overrides(resolved: ResolvedSeeds) -> str:
     """Hydra CLI fragment threading resolved seeds into subprocess commands."""
     return (
         f"seed={resolved.global_seed} "
-        f"training.random_state={resolved.training} "
         f"feature_selection.seed={resolved.feature_selection} "
         f"extraction.seed={resolved.extraction} "
         f"optimization.seed={resolved.optimization} "
@@ -234,7 +216,6 @@ def __main__() -> None:
     cfg = OmegaConf.create(
         {
             "seed": 42,
-            "training": {"random_state": None},
             "feature_selection": {"seed": None},
             "extraction": {"seed": None},
             "optimization": {
@@ -247,7 +228,7 @@ def __main__() -> None:
         }
     )
     resolved = resolve_seeds_from_cfg(cfg)
-    assert resolved.training == 42
+    assert resolved.feature_selection == 42
     assert resolved.optimization_fast_sample == 42
 
     cfg_opt = OmegaConf.merge(cfg, {"optimization": {"seed": 99}})

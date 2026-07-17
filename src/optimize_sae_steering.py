@@ -753,6 +753,8 @@ def main(cfg: DictConfig):
 
         opt_cfg = cfg.optimization
         ipi_cfg = cfg.get("ipi", {}) or {}
+        intervention_cfg = cfg.get("intervention", {}) or {}
+        artifacts_cfg = cfg.get("artifacts", {}) or {}
         resolved = resolve_seeds_from_cfg(cfg)
         log_resolved_seeds(resolved, prefix="optimize_sae_steering")
         option_scores = resolve_option_scores(cfg)
@@ -768,16 +770,22 @@ def main(cfg: DictConfig):
 
         # W&B configuration
         wandb_cfg = cfg.get('wandb', {})
-        feature_artifact_name = opt_cfg.get('feature_artifact_name', None)
-        top_k = opt_cfg.get('top_k', opt_cfg.get('target_neuron_count', 80))
+        feature_artifact_name = artifacts_cfg.get('feature_ranking', None)
+        top_k = opt_cfg.get('top_k', 80)
         n_trials = opt_cfg.get('n_trials', 3000)
         direction = opt_cfg.get('direction', 'maximize')
-        intervention_scope = str(opt_cfg.get('intervention_scope', DEFAULT_SCOPE))
-        intervention_last_k = int(opt_cfg.get('intervention_last_k', DEFAULT_LAST_K))
-        decoder_normalization = str(
-            opt_cfg.get('decoder_normalization', DEFAULT_DECODER_NORMALIZATION)
+        intervention_scope = str(
+            intervention_cfg.get('intervention_scope', DEFAULT_SCOPE)
         )
-        edit_mode = str(opt_cfg.get('edit_mode', DEFAULT_EDIT_MODE))
+        intervention_last_k = int(
+            intervention_cfg.get('intervention_last_k', DEFAULT_LAST_K)
+        )
+        decoder_normalization = str(
+            intervention_cfg.get(
+                'decoder_normalization', DEFAULT_DECODER_NORMALIZATION
+            )
+        )
+        edit_mode = str(intervention_cfg.get('edit_mode', DEFAULT_EDIT_MODE))
         auto_bounds = bool(opt_cfg.get('auto_bounds', False))
         bounds_multiplier = float(
             opt_cfg.get('bounds_multiplier', DEFAULT_BOUNDS_MULTIPLIER)
@@ -785,13 +793,13 @@ def main(cfg: DictConfig):
 
         if edit_mode not in VALID_EDIT_MODES:
             raise ValueError(
-                f"Invalid optimization.edit_mode={edit_mode!r}. "
+                f"Invalid intervention.edit_mode={edit_mode!r}. "
                 f"Expected one of {VALID_EDIT_MODES}."
             )
         if auto_bounds and edit_mode != EDIT_MODE_LATENT_CLAMP:
             raise ValueError(
                 f"optimization.auto_bounds=True requires "
-                f"optimization.edit_mode={EDIT_MODE_LATENT_CLAMP!r} (got "
+                f"intervention.edit_mode={EDIT_MODE_LATENT_CLAMP!r} (got "
                 f"{edit_mode!r}): mean_left/mean_right feature statistics are "
                 "in latent-activation units and are not a meaningful scale "
                 f"reference for {EDIT_MODE_DECODER_DELTA!r}."
@@ -812,7 +820,8 @@ def main(cfg: DictConfig):
         assert_scope(intervention_scope)
         if intervention_last_k < 0:
             raise ValueError(
-                f"Invalid optimization.intervention_last_k={intervention_last_k!r}. Expected a non-negative integer."
+                f"Invalid intervention.intervention_last_k={intervention_last_k!r}. "
+                f"Expected a non-negative integer."
             )
 
         top_k = int(top_k)
@@ -844,9 +853,9 @@ def main(cfg: DictConfig):
             str(validation_dataset)
         )
 
-        # Determine target neurons: from artifact or config
+        # Determine target features: from artifact or config
         if feature_artifact_name:
-            # Fetch SVM feature ranking artifact dynamically
+            # Fetch SAE feature ranking artifact dynamically
             print(
                 f"\nFetching feature ranking artifact: {feature_artifact_name}")
             artifact = wandb.use_artifact(feature_artifact_name)
@@ -908,11 +917,11 @@ def main(cfg: DictConfig):
             )
         else:
             # Use target features from YAML config
-            configured = opt_cfg.get("target_neurons", None)
+            configured = opt_cfg.get("target_features", None)
             if not configured:
                 raise ValueError(
-                    "Either optimization.feature_artifact_name or "
-                    "optimization.target_neurons must be set."
+                    "Either artifacts.feature_ranking or "
+                    "optimization.target_features must be set."
                 )
             target_features = list(configured)
             # No ranking artifact available manually; auto_bounds will fall
@@ -1258,7 +1267,7 @@ def main(cfg: DictConfig):
         # --- ARTIFACT: Log intervention multipliers as versioned model-weights artifact ---
         best_trial = study.best_trial
         artifacts_cfg = cfg.get('artifacts', {}) or {}
-        multiplier_override = artifacts_cfg.get('multiplier_name', None)
+        multiplier_override = artifacts_cfg.get('multipliers', None)
         if multiplier_override:
             multipliers_artifact_name = str(multiplier_override)
         else:
@@ -1319,13 +1328,12 @@ def main(cfg: DictConfig):
                 'direction': direction,
                 'top_k': top_k,
                 'split_id': split_id,
-                'feature_artifact_name': feature_artifact_name,
+                'feature_ranking': feature_artifact_name,
                 'optimization_dataset': optimization_dataset_path,
                 'validation_dataset': validation_dataset_path,
                 'seed': seed,
                 'fast_sample_seed': fast_sample_seed,
                 'split_seed': split_seed,
-                'n_target_neurons': len(target_features),
                 'n_target_features': len(target_features),
                 'intervention_scope': intervention_scope,
                 'intervention_last_k': intervention_last_k,
@@ -1357,11 +1365,10 @@ def main(cfg: DictConfig):
             'top_k': top_k,
             'direction': direction,
             'split_id': split_id,
-            'feature_artifact_name': feature_artifact_name,
+            'feature_ranking': feature_artifact_name,
             'optimization_dataset': optimization_dataset_path,
             'validation_dataset': validation_dataset_path,
             'seed': seed,
-            'n_target_neurons': len(target_features),
             'n_target_features': len(target_features),
             'intervention_scope': intervention_scope,
             'intervention_last_k': intervention_last_k,

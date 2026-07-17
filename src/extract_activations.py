@@ -95,7 +95,7 @@ def main(cfg: DictConfig):
     # Orchestrator-driven name takes precedence over the dataset-derived default
     # so a sweep can pin a deterministic identity (see src/utils/experiment_ids.py).
     artifacts_cfg = cfg.get('artifacts', {}) or {}
-    override_name = artifacts_cfg.get('activations_name', None)
+    override_name = artifacts_cfg.get('activations', None)
     artifact_name = (
         str(override_name)
         if override_name

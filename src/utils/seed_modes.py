@@ -61,58 +61,6 @@ def resolve_option_scores_for_mode(
     return letter_to_score_from_seed(mapping_seed, language=language)
 
 
-def merged_question_score_variance_cfg(cfg: Any) -> dict[str, Any]:
-    """Merge ``question_score_variance`` defaults, experiment overrides, and CLI."""
-    from omegaconf import DictConfig, OmegaConf
-
-    merged: dict[str, Any] = {}
-    if hasattr(cfg, "get"):
-        base = cfg.get("question_score_variance")
-        if base is not None:
-            merged.update(OmegaConf.to_container(base, resolve=True) or {})
-
-        experiment = cfg.get("experiment")
-        if experiment is not None and hasattr(experiment, "get"):
-            exp_qvar = experiment.get("question_score_variance")
-            if exp_qvar is not None:
-                merged.update(OmegaConf.to_container(exp_qvar, resolve=True) or {})
-            for key in (
-                "seed_mode",
-                "fixed_runtime_seed",
-                "option_mapping_seeds",
-                "questions_csv",
-                "score_scale",
-                "max_questions",
-                "output_dir",
-            ):
-                value = experiment.get(key)
-                if value is not None:
-                    merged[key] = (
-                        OmegaConf.to_container(value, resolve=True)
-                        if isinstance(value, DictConfig)
-                        else value
-                    )
-
-        for key in (
-            "seed_mode",
-            "fixed_runtime_seed",
-            "option_mapping_seeds",
-            "questions_csv",
-            "score_scale",
-            "max_questions",
-            "output_dir",
-        ):
-            value = cfg.get(key)
-            if value is not None:
-                merged[key] = (
-                    OmegaConf.to_container(value, resolve=True)
-                    if isinstance(value, DictConfig)
-                    else value
-                )
-
-    return merged
-
-
 def qvar_cfg_value(qvar_cfg: dict[str, Any], key: str, default: Any) -> Any:
     value = qvar_cfg.get(key, default)
     if value is None:

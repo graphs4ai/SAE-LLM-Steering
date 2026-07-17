@@ -259,10 +259,11 @@ def main(cfg: DictConfig) -> None:
             f"feature_selection.ranking_top_n must be positive, got {ranking_top_n}"
         )
 
-    activations_artifact_name = cfg.data.get("activations_artifact_name", None)
+    artifacts_cfg = cfg.get("artifacts", {}) or {}
+    activations_artifact_name = artifacts_cfg.get("activations", None)
     if not activations_artifact_name:
         raise ValueError(
-            "data.activations_artifact_name must be set "
+            "artifacts.activations must be set "
             "(W&B activations artifact from extract_activations)."
         )
 
@@ -389,8 +390,7 @@ def main(cfg: DictConfig) -> None:
     pd.DataFrame(ranked_features).to_csv(feature_ranking_csv_path, index=False)
     print(f"Feature ranking CSV saved to: {feature_ranking_csv_path}")
 
-    artifacts_cfg = cfg.get("artifacts", {}) or {}
-    feature_ranking_override = artifacts_cfg.get("feature_ranking_name", None)
+    feature_ranking_override = artifacts_cfg.get("feature_ranking", None)
     if feature_ranking_override:
         feature_artifact_name_out = str(feature_ranking_override)
     else:

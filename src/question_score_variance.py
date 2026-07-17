@@ -33,7 +33,6 @@ from model_factory import get_model_wrapper
 from utils.ipi_surrogate import IPI_OPTION_LETTERS, SCORES_ORDERED
 from utils.seed_modes import (
     SEED_MODE_LABELS,
-    merged_question_score_variance_cfg,
     qvar_cfg_value,
     resolve_mapping_seed,
     resolve_option_scores_for_mode,
@@ -279,7 +278,8 @@ def _plot_score_scatter(
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig) -> None:
-    qvar_cfg = merged_question_score_variance_cfg(cfg)
+    raw_qvar = cfg.get("question_score_variance")
+    qvar_cfg = dict(OmegaConf.to_container(raw_qvar, resolve=True) or {})
     seed_mode = _resolve_seed_mode(qvar_cfg)
     fixed_runtime_seed = _resolve_fixed_runtime_seed(qvar_cfg)
     sweep_seeds = _resolve_sweep_seeds(qvar_cfg)

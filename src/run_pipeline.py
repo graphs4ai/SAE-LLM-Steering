@@ -154,6 +154,11 @@ def _build_commands(
     experiment_prefix = _experiment_cli_prefix(cfg)
     model_stage_args = _model_stage_cli_overrides(sae_width, bounds_multiplier)
 
+    intervention_args = (
+        f"intervention.intervention_scope={intervention_scope} "
+        f"intervention.intervention_last_k={intervention_last_k} "
+    )
+
     cmds: list[str] = []
     if stages.get("extract_activations", False):
         cmds.append(
@@ -161,7 +166,7 @@ def _build_commands(
             f"{experiment_prefix}"
             f"model={model_cfg_name} "
             f"{model_stage_args}"
-            f"artifacts.activations_name={activations_name} "
+            f"artifacts.activations={activations_name} "
             f"{seed_args}"
         )
     if stages.get("feature_selection", False):
@@ -170,8 +175,8 @@ def _build_commands(
             f"{experiment_prefix}"
             f"model={model_cfg_name} "
             f"{_sae_width_cli_override(sae_width)}"
-            f"data.activations_artifact_name={activations_ref} "
-            f"artifacts.feature_ranking_name={feature_ranking_name} "
+            f"artifacts.activations={activations_ref} "
+            f"artifacts.feature_ranking={feature_ranking_name} "
             f"{seed_args}"
         )
     if stages.get("optimization", False):
@@ -183,10 +188,9 @@ def _build_commands(
             f"optimization.direction={direction} "
             f"optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
-            f"optimization.intervention_scope={intervention_scope} "
-            f"optimization.intervention_last_k={intervention_last_k} "
-            f"optimization.feature_artifact_name={feature_ranking_ref} "
-            f"artifacts.multiplier_name={multipliers_name} "
+            f"{intervention_args}"
+            f"artifacts.feature_ranking={feature_ranking_ref} "
+            f"artifacts.multipliers={multipliers_name} "
             f"{seed_args}"
         )
     if stages.get("ipi_baseline", False) and include_baseline_ipi:
@@ -196,10 +200,9 @@ def _build_commands(
             f"model={model_cfg_name} "
             f"{_sae_width_cli_override(sae_width)}"
             f"ipi.condition=baseline "
-            "ipi.multiplier_artifact_name=null "
-            f"ipi.intervention_scope={intervention_scope} "
-            f"ipi.intervention_last_k={intervention_last_k} "
-            f"artifacts.ipi_baseline_name={ipi_baseline_name} "
+            "artifacts.multipliers=null "
+            f"{intervention_args}"
+            f"artifacts.ipi_baseline={ipi_baseline_name} "
             f"{seed_args}"
         )
     if stages.get("ipi_intervened", False):
@@ -211,10 +214,9 @@ def _build_commands(
             f"ipi.condition=intervened "
             f"optimization.direction={direction} optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
-            f"ipi.intervention_scope={intervention_scope} "
-            f"ipi.intervention_last_k={intervention_last_k} "
-            f"ipi.multiplier_artifact_name={multipliers_ref} "
-            f"artifacts.ipi_intervened_name={ipi_intervened_name} "
+            f"{intervention_args}"
+            f"artifacts.multipliers={multipliers_ref} "
+            f"artifacts.ipi_intervened={ipi_intervened_name} "
             f"{seed_args}"
         )
     if stages.get("poeta", False):
@@ -222,6 +224,8 @@ def _build_commands(
             f"python src/poeta_evaluator.py {experiment_prefix}"
             f"model={model_cfg_name} "
             f"{_sae_width_cli_override(sae_width)}"
+            f"artifacts.multipliers={multipliers_ref} "
+            f"{intervention_args}"
             f"{seed_args}"
         )
     return cmds
