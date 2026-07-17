@@ -36,6 +36,7 @@ from utils.seeds import (
     seed_cli_overrides,
     seed_sweep_values,
 )
+from utils.weight_cache import report_pipeline_weight_cache
 
 
 def _null_metrics() -> dict[str, Any]:
@@ -766,6 +767,16 @@ def main(cfg: DictConfig) -> None:
     print(f"resume={cfg.pipeline.get('resume', True)} force={cfg.pipeline.get('force', False)}")
     print(f"skip_existing={cfg.pipeline.get('skip_existing', True)}")
     print("=" * 70)
+
+    if dry_run:
+        # Offline-friendly checklist for HPC: which HF model / SAE weights the
+        # planned matrix will try to load, and whether they are already cached.
+        report_pipeline_weight_cache(
+            cfg=cfg,
+            experiment=experiment,
+            sae_widths=sae_widths,
+            project_root=project_root,
+        )
 
     trial_grid = dict(experiment.trial_grid)
     counters: dict[str, int] = {"planned": 0, "skipped": 0, "failed": 0, "preserved": 0}
