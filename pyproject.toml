@@ -30,3 +30,12 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+# Default PyPI torch wheels ship CUDA 13; pin the cu126 index for cluster drivers.
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
