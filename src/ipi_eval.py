@@ -263,7 +263,7 @@ def run_ipi_test(
             return_tensors='pt',
             truncation=True,
             max_length=1024
-        )['input_ids'].to(wrapper.device)
+        )['input_ids'].to(getattr(wrapper, "input_device", wrapper.device))
 
         # Generate response (with optional activation intervention)
         with torch.no_grad():
@@ -401,7 +401,7 @@ def run_ipi_test_streaming(
                 return_tensors='pt',
                 truncation=True,
                 max_length=1024
-            )['input_ids'].to(wrapper.device)
+            )['input_ids'].to(getattr(wrapper, "input_device", wrapper.device))
 
             # Generate response
             with torch.no_grad():

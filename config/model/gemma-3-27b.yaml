@@ -3,9 +3,8 @@
 model:
   name: "google/gemma-3-27b-it"
   wrapper: "gemma"
-  # Gemma3Wrapper currently loads via SAETransformerBridge on a single device.
-  # Prefer a GPU with enough VRAM for bf16 (~54GB+) or reduce batch sizes below.
-  n_devices: 1
+  # bf16 weights alone are ~54GB; shard across 2x40GB (or larger) GPUs.
+  n_devices: 2
   dtype: "bfloat16"  # "float16" or "bfloat16"
 
 extraction:

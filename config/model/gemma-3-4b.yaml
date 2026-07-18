@@ -3,7 +3,7 @@
 model:
   name: "google/gemma-3-4b-it"
   wrapper: "gemma"
-  n_devices: 1  # Number of GPUs (increase if model doesn't fit on one GPU)
+  n_devices: 1  # Increase to shard across GPUs if the model does not fit on one GPU
   dtype: "bfloat16"  # "float16" or "bfloat16"
 
 extraction:

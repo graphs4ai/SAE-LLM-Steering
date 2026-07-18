@@ -119,7 +119,10 @@ class Gemma3Wrapper:
             model_name: Gemma-3 checkpoint (e.g. "google/gemma-3-4b-it")
             device: "cuda" or "cpu"
             dtype: torch.bfloat16 recommended for Gemma Scope 2
-            n_devices: Ignored; SAETransformerBridge path is single-device.
+            n_devices: Number of GPUs to shard the model across (model
+                        parallelism via TransformerBridge ``n_devices``).
+                        When > 1, inputs go to ``cuda:0`` and each SAE is
+                        placed on the same device as its residual block.
             sae_layers: Layers to load SAEs for (subset of the release's
                         allowed SAE layers, or "all"). If None, SAEs are
                         loaded lazily on first ``get_layer_activations`` call.
@@ -127,28 +130,32 @@ class Gemma3Wrapper:
             sae_l0: SAE L0 id (e.g. "medium")
             sae_release: HuggingFace SAE release name
         """
-        if n_devices > 1:
-            print(
-                "Warning: Gemma3Wrapper ignores n_devices>1; "
-                "SAETransformerBridge uses a single device."
-            )
-
         self.device = device
-        self.n_devices = 1
+        self.n_devices = max(1, int(n_devices))
         self.dtype = dtype
         self.sae_width = sae_width
         self.sae_l0 = sae_l0
         self.sae_release = sae_release
         self.allowed_sae_layers = infer_allowed_sae_layers(sae_release)
 
+        boot_kwargs: Dict[str, Any] = {"dtype": dtype}
+        if self.n_devices > 1:
+            # TransformerBridge translates n_devices into a balanced HF
+            # device_map. Do not pass ``device`` alongside it.
+            boot_kwargs["n_devices"] = self.n_devices
+        else:
+            boot_kwargs["device"] = device
+
         self.model = SAETransformerBridge.boot_transformers(
             model_name,
-            device=device,
-            dtype=dtype,
+            **boot_kwargs,
         )
 
-        # Single-device path: inputs go to the model device.
-        if getattr(self.model.cfg, "device", None) is not None:
+        # Inputs must land on the embedding device (cuda:0 under a shard).
+        if self.n_devices > 1:
+            cfg_device = getattr(self.model.cfg, "device", None)
+            self.input_device = str(cfg_device) if cfg_device is not None else "cuda:0"
+        elif getattr(self.model.cfg, "device", None) is not None:
             self.input_device = str(self.model.cfg.device)
         else:
             self.input_device = device
@@ -223,11 +230,14 @@ class Gemma3Wrapper:
             self.allowed_sae_layers = infer_allowed_sae_layers(release)
 
         resolved_layers = self.resolve_sae_layers(layers)
-        sae_device = self.input_device
 
         for layer in resolved_layers:
             if layer in self.saes:
                 continue
+
+            # Keep each SAE on the same GPU as its residual block so encode /
+            # decode during caching and latent-clamp interventions stay local.
+            sae_device = str(self.device_for_layer(layer))
 
             sae_id = f"layer_{layer}_width_{width}_l0_{l0}"
             sae, _cfg_dict, _sparsity = SAE.from_pretrained_with_cfg_and_sparsity(
@@ -332,6 +342,29 @@ class Gemma3Wrapper:
         site = self.model.blocks[layer]
         self.residual_sites[layer] = site
         return site
+
+    @staticmethod
+    def _module_device(module: nn.Module) -> Optional[torch.device]:
+        """Best-effort device of a module (params, then buffers)."""
+        try:
+            return next(module.parameters()).device
+        except StopIteration:
+            pass
+        try:
+            return next(module.buffers()).device
+        except StopIteration:
+            return None
+
+    def device_for_layer(self, layer: int) -> torch.device:
+        """Device that hosts residual activations for ``layer``.
+
+        Under ``n_devices > 1`` this may differ per layer; otherwise it
+        matches ``input_device``.
+        """
+        site_device = self._module_device(self._get_residual_site(layer))
+        if site_device is not None:
+            return site_device
+        return torch.device(self.input_device)
 
     @staticmethod
     def _split_module_output(

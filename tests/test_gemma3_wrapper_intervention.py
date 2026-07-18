@@ -16,11 +16,25 @@ if str(_SRC) not in sys.path:
 # Avoid pulling sae_lens / transformer_lens during lightweight unit tests.
 if "sae_lens" not in sys.modules:
     sae_lens = ModuleType("sae_lens")
+    sae_lens.__path__ = []  # mark as package
     sae_lens.SAE = type("SAE", (), {})
+
     bridge_mod = ModuleType("sae_lens.analysis.sae_transformer_bridge")
     bridge_mod.SAETransformerBridge = MagicMock()
+
+    analysis_pkg = ModuleType("sae_lens.analysis")
+    analysis_pkg.__path__ = []
+
+    loading_pkg = ModuleType("sae_lens.loading")
+    loading_pkg.__path__ = []
+    loaders_mod = ModuleType("sae_lens.loading.pretrained_sae_loaders")
+    loaders_mod.get_safetensors_tensor_shapes = lambda *a, **k: {}
+
     sys.modules["sae_lens"] = sae_lens
+    sys.modules["sae_lens.analysis"] = analysis_pkg
     sys.modules["sae_lens.analysis.sae_transformer_bridge"] = bridge_mod
+    sys.modules["sae_lens.loading"] = loading_pkg
+    sys.modules["sae_lens.loading.pretrained_sae_loaders"] = loaders_mod
 
 from gemma_3_wrapper import Gemma3Wrapper
 
@@ -93,6 +107,8 @@ class MockSAE:
 def make_test_wrapper() -> Gemma3Wrapper:
     wrapper = Gemma3Wrapper.__new__(Gemma3Wrapper)
     wrapper.input_device = "cpu"
+    wrapper.device = "cpu"
+    wrapper.n_devices = 1
     wrapper.dtype = torch.float32
     wrapper.sae_release = "gemma-scope-2-4b-it-res"
     wrapper.allowed_sae_layers = (9, 17, 22, 29)
@@ -108,6 +124,85 @@ def make_test_wrapper() -> Gemma3Wrapper:
     wrapper.residual_sites = {}
     wrapper._d_sae = 4
     return wrapper
+
+
+def test_device_for_layer_matches_block_device(wrapper: Gemma3Wrapper) -> None:
+    # Place layers on distinct logical devices via meta-less CPU tensors with
+    # different .device tags by moving one block's params (still CPU).
+    site_17 = wrapper._get_residual_site(17)
+    assert wrapper.device_for_layer(17) == next(site_17.parameters()).device
+    assert wrapper.device_for_layer(22) == next(
+        wrapper._get_residual_site(22).parameters()
+    ).device
+
+
+def test_boot_kwargs_pass_n_devices() -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeBridge:
+        @staticmethod
+        def boot_transformers(model_name: str, **kwargs: Any) -> MockModel:
+            captured["model_name"] = model_name
+            captured["kwargs"] = kwargs
+            model = MockModel()
+            model.cfg = SimpleNamespace(
+                n_layers=N_LAYERS,
+                device="cuda:0",
+                n_devices=kwargs.get("n_devices", 1),
+            )
+            return model
+
+    import gemma_3_wrapper as gw
+
+    original = gw.SAETransformerBridge
+    gw.SAETransformerBridge = FakeBridge
+    try:
+        wrapper = Gemma3Wrapper(
+            model_name="google/gemma-3-4b-it",
+            device="cuda",
+            dtype=torch.bfloat16,
+            n_devices=2,
+            sae_layers=None,
+        )
+    finally:
+        gw.SAETransformerBridge = original
+
+    assert captured["kwargs"].get("n_devices") == 2
+    assert "device" not in captured["kwargs"]
+    assert wrapper.n_devices == 2
+    assert wrapper.input_device == "cuda:0"
+
+
+def test_boot_kwargs_single_device_passes_device() -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeBridge:
+        @staticmethod
+        def boot_transformers(model_name: str, **kwargs: Any) -> MockModel:
+            captured["kwargs"] = kwargs
+            model = MockModel()
+            model.cfg = SimpleNamespace(n_layers=N_LAYERS, device="cpu", n_devices=1)
+            return model
+
+    import gemma_3_wrapper as gw
+
+    original = gw.SAETransformerBridge
+    gw.SAETransformerBridge = FakeBridge
+    try:
+        wrapper = Gemma3Wrapper(
+            model_name="google/gemma-3-4b-it",
+            device="cpu",
+            dtype=torch.float32,
+            n_devices=1,
+            sae_layers=None,
+        )
+    finally:
+        gw.SAETransformerBridge = original
+
+    assert captured["kwargs"].get("device") == "cpu"
+    assert "n_devices" not in captured["kwargs"]
+    assert wrapper.n_devices == 1
+    assert wrapper.input_device == "cpu"
 
 
 def _count_forward_hooks(module: nn.Module) -> int:
@@ -287,10 +382,16 @@ def _run_all() -> None:
         test_generation_intervention_fires_hooks_and_debug_seq_lens,
         test_hook_cleanup_on_success_and_failure,
         test_forward_logits_intervention_path,
+        test_device_for_layer_matches_block_device,
     ]
     for test in tests:
         test(wrapper)
         print(f"passed: {test.__name__}")
+
+    test_boot_kwargs_pass_n_devices()
+    print("passed: test_boot_kwargs_pass_n_devices")
+    test_boot_kwargs_single_device_passes_device()
+    print("passed: test_boot_kwargs_single_device_passes_device")
 
 
 if __name__ == "__main__":

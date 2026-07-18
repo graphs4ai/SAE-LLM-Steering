@@ -103,6 +103,7 @@ class IntervenedLlamaLM(BaseLM):
         activation_multipliers: Optional[Dict[str, float]] = None,
         wrapper_type: str = "llama",
         dtype: Optional[torch.dtype] = None,
+        n_devices: int = 1,
     ):
         """
         Initialize the intervened model for PoETa evaluation.
@@ -115,10 +116,10 @@ class IntervenedLlamaLM(BaseLM):
                                    for activation interventions. None for baseline.
             wrapper_type: "llama", "gemma", "qwen", or "phi"
             dtype: Model data type (e.g. torch.bfloat16). Used if wrapper_type needs it.
+            n_devices: Number of GPUs to shard the model across (model parallelism).
         """
         super().__init__()
 
-        self._device = torch.device(device)
         self.batch_size_per_gpu = batch_size
         self.activation_multipliers = activation_multipliers or {}
 
@@ -127,11 +128,18 @@ class IntervenedLlamaLM(BaseLM):
         print(
             f"Activation interventions: {len(self.activation_multipliers)} neurons")
         WrapperClass = get_wrapper_class(wrapper_type)
+        wrapper_kwargs: Dict[str, Any] = {
+            "model_name": pretrained,
+            "device": device,
+            "n_devices": n_devices,
+        }
         if dtype is not None:
-            self.wrapper = WrapperClass(
-                model_name=pretrained, device=device, dtype=dtype)
-        else:
-            self.wrapper = WrapperClass(model_name=pretrained, device=device)
+            wrapper_kwargs["dtype"] = dtype
+        self.wrapper = WrapperClass(**wrapper_kwargs)
+
+        # Prefer the wrapper's input device (cuda:0 under multi-GPU sharding).
+        input_device = getattr(self.wrapper, "input_device", device)
+        self._device = torch.device(input_device)
 
         # Get references to model and tokenizer from wrapper
         self.model = self.wrapper.model
@@ -305,6 +313,7 @@ def run_poeta_evaluation(
     multiplier_source: str = "none",
     multiplier_artifact_name: Optional[str] = None,
     random_seed: Optional[int] = None,
+    n_devices: int = 1,
 ) -> Dict[str, Any]:
     """
     Run PoETa V2 benchmark evaluation on a model with optional interventions.
@@ -322,6 +331,7 @@ def run_poeta_evaluation(
         limit: Limit number of examples per task (for testing)
         output_path: Path to save results JSON
         description_dict_path: Path to task description JSON
+        n_devices: Number of GPUs to shard the model across
 
     Returns:
         Dictionary containing evaluation results
@@ -353,6 +363,7 @@ def run_poeta_evaluation(
         activation_multipliers=activation_multipliers,
         wrapper_type=wrapper_type,
         dtype=dtype,
+        n_devices=n_devices,
     )
 
     # Determine output directory (convert to absolute path for saving outside PoETa dir)
@@ -589,6 +600,15 @@ def main(cfg: DictConfig):
     model_name = model_cfg.get('name', cfg.get(
         'model_name', 'meta-llama/Llama-3.1-8B-Instruct'))
     wrapper_type = model_cfg.get('wrapper', 'llama')
+    n_devices = int(model_cfg.get('n_devices', 1) or 1)
+    if n_devices > 1 and torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        if gpu_count < n_devices:
+            print(
+                f"Warning: n_devices={n_devices} requested but only "
+                f"{gpu_count} GPU(s) available. Using n_devices={gpu_count}."
+            )
+            n_devices = max(gpu_count, 1)
 
     dtype_str = model_cfg.get('dtype', 'float16').lower()
     dtype_map = {
@@ -698,6 +718,7 @@ def main(cfg: DictConfig):
             multiplier_source=multiplier_source,
             multiplier_artifact_name=multiplier_artifact_name,
             random_seed=poeta_seed,
+            n_devices=n_devices,
         )
 
     if poeta_save_logs:
@@ -724,6 +745,7 @@ def main(cfg: DictConfig):
         'limit': poeta_limit,
         'prompt_modes': poeta_prompt_modes,
         'device': poeta_device,
+        'n_devices': n_devices,
         'batch_size': poeta_batch_size,
         'compare_baseline': poeta_compare_baseline,
         'output_dir': poeta_output_dir,
