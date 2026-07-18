@@ -20,7 +20,7 @@ See `notebooks/gemma_scope2_playground.ipynb` for an interactive Gemma Scope 2 s
 
 ```bash
 uv sync
-huggingface-cli login  # gated Gemma weights
+hf login  # gated Gemma weights
 
 # Dry-run the full sweep matrix (4b)
 uv run python src/run_pipeline.py experiment=gemma_scope pipeline.dry_run=true

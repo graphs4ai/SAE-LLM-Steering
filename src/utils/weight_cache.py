@@ -53,13 +53,13 @@ class WeightAsset:
 
     def download_command(self) -> str:
         if self.kind == "model":
-            return f"huggingface-cli download {self.repo_id}"
+            return f"hf download {self.repo_id}"
         if len(self.files) == 1:
-            return f"huggingface-cli download {self.repo_id} {self.files[0]}"
+            return f"hf download {self.repo_id} {self.files[0]}"
         # SAE folders: include both params + config via a prefix glob.
         prefixes = sorted({str(Path(f).parent).replace("\\", "/") for f in self.files})
         includes = " ".join(f'--include "{prefix}/*"' for prefix in prefixes)
-        return f"huggingface-cli download {self.repo_id} {includes}"
+        return f"hf download {self.repo_id} {includes}"
 
 
 @dataclass

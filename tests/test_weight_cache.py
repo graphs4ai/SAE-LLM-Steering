@@ -27,7 +27,7 @@ def test_weight_asset_status_and_download_command() -> None:
         missing_files=(),
     )
     assert cached.status == "cached"
-    assert cached.download_command() == "huggingface-cli download google/gemma-3-4b-it"
+    assert cached.download_command() == "hf download google/gemma-3-4b-it"
 
     sae = WeightAsset(
         kind="sae",
@@ -45,7 +45,7 @@ def test_weight_asset_status_and_download_command() -> None:
     )
     assert sae.status == "missing"
     cmd = sae.download_command()
-    assert "huggingface-cli download google/gemma-scope-2-4b-it" in cmd
+    assert "hf download google/gemma-scope-2-4b-it" in cmd
     assert '--include "resid_post/layer_17_width_65k_l0_medium/*"' in cmd
 
 
@@ -108,7 +108,7 @@ def test_format_report_includes_download_commands() -> None:
     ]
     text = format_weight_cache_report(assets)
     assert "[missing] base model google/gemma-3-27b-it" in text
-    assert "huggingface-cli download google/gemma-3-27b-it" in text
+    assert "hf download google/gemma-3-27b-it" in text
     assert "HF_HOME" in text
 
 
