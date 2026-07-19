@@ -86,6 +86,34 @@ def parse_feature_coefficient_name(name: str) -> Tuple[int, int]:
     return layer, feature
 
 
+def multi_gpu_boot_kwargs(n_devices: int) -> Dict[str, Any]:
+    """HF sharding kwargs that avoid TransformerLens's broken ``n_devices`` path.
+
+    ``transformer_lens.utilities.multi_gpu.resolve_device_map`` translates
+    ``n_devices > 1`` into ``device_map="balanced"`` plus
+    ``max_memory={i: "auto", ...}``. Accelerate rejects ``"auto"`` as a
+    memory size (``convert_file_size_to_int``), so we pass an explicit
+    ``device_map`` and integer byte budgets instead.
+    """
+    if n_devices <= 1:
+        raise ValueError(f"multi_gpu_boot_kwargs expects n_devices > 1, got {n_devices}")
+    if not torch.cuda.is_available():
+        raise ValueError(f"n_devices={n_devices} requires CUDA, which is not available.")
+    gpu_count = torch.cuda.device_count()
+    if gpu_count < n_devices:
+        raise ValueError(
+            f"n_devices={n_devices} but only {gpu_count} CUDA device(s) present."
+        )
+    max_memory: Dict[Union[int, str], int] = {
+        i: int(torch.cuda.get_device_properties(i).total_memory)
+        for i in range(n_devices)
+    }
+    # Hide any extra visible GPUs so HF only shards across n_devices.
+    for i in range(n_devices, gpu_count):
+        max_memory[i] = 0
+    return {"device_map": "balanced", "max_memory": max_memory}
+
+
 class Gemma3Wrapper:
     """
     Wrapper for Gemma-3 models using SAETransformerBridge + Gemma Scope 2 SAEs.
@@ -120,7 +148,7 @@ class Gemma3Wrapper:
             device: "cuda" or "cpu"
             dtype: torch.bfloat16 recommended for Gemma Scope 2
             n_devices: Number of GPUs to shard the model across (model
-                        parallelism via TransformerBridge ``n_devices``).
+                        parallelism via HF ``device_map="balanced"``).
                         When > 1, inputs go to ``cuda:0`` and each SAE is
                         placed on the same device as its residual block.
             sae_layers: Layers to load SAEs for (subset of the release's
@@ -140,9 +168,10 @@ class Gemma3Wrapper:
 
         boot_kwargs: Dict[str, Any] = {"dtype": dtype}
         if self.n_devices > 1:
-            # TransformerBridge translates n_devices into a balanced HF
-            # device_map. Do not pass ``device`` alongside it.
-            boot_kwargs["n_devices"] = self.n_devices
+            # Do not pass TransformerBridge ``n_devices``: its resolve_device_map
+            # emits invalid max_memory={i: "auto"}. Do not pass ``device`` either
+            # (mutually exclusive with device_map).
+            boot_kwargs.update(multi_gpu_boot_kwargs(self.n_devices))
         else:
             boot_kwargs["device"] = device
 

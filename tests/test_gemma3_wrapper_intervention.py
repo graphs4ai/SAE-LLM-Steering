@@ -36,12 +36,50 @@ if "sae_lens" not in sys.modules:
     sys.modules["sae_lens.loading"] = loading_pkg
     sys.modules["sae_lens.loading.pretrained_sae_loaders"] = loaders_mod
 
-from gemma_3_wrapper import Gemma3Wrapper
+from gemma_3_wrapper import Gemma3Wrapper, multi_gpu_boot_kwargs
 
 
 D_MODEL = 8
 N_LAYERS = 26
 VOCAB = 32
+
+
+def test_multi_gpu_boot_kwargs_emits_integer_budgets() -> None:
+    """Regression: max_memory values must be ints, never the string 'auto'."""
+    import gemma_3_wrapper as gw
+
+    class _Props:
+        total_memory = 40 * (1024**3)
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def device_count() -> int:
+            return 3
+
+        @staticmethod
+        def get_device_properties(i: int) -> _Props:
+            del i
+            return _Props()
+
+    original_cuda = gw.torch.cuda
+    gw.torch.cuda = _FakeCuda  # type: ignore[assignment]
+    try:
+        kwargs = multi_gpu_boot_kwargs(2)
+    finally:
+        gw.torch.cuda = original_cuda
+
+    assert kwargs["device_map"] == "balanced"
+    assert kwargs["max_memory"] == {
+        0: 40 * (1024**3),
+        1: 40 * (1024**3),
+        2: 0,
+    }
+    assert all(isinstance(v, int) for v in kwargs["max_memory"].values())
+    assert "auto" not in kwargs["max_memory"].values()
 
 
 class MockBlock(nn.Module):
@@ -148,14 +186,20 @@ def test_boot_kwargs_pass_n_devices() -> None:
             model.cfg = SimpleNamespace(
                 n_layers=N_LAYERS,
                 device="cuda:0",
-                n_devices=kwargs.get("n_devices", 1),
+                n_devices=2,
             )
             return model
 
     import gemma_3_wrapper as gw
 
     original = gw.SAETransformerBridge
+    original_multi = gw.multi_gpu_boot_kwargs
     gw.SAETransformerBridge = FakeBridge
+    # Avoid requiring 2 real GPUs in CI; still assert the intended kwargs shape.
+    gw.multi_gpu_boot_kwargs = lambda n: {
+        "device_map": "balanced",
+        "max_memory": {i: 40 * (1024**3) for i in range(n)},
+    }
     try:
         wrapper = Gemma3Wrapper(
             model_name="google/gemma-3-4b-it",
@@ -166,8 +210,14 @@ def test_boot_kwargs_pass_n_devices() -> None:
         )
     finally:
         gw.SAETransformerBridge = original
+        gw.multi_gpu_boot_kwargs = original_multi
 
-    assert captured["kwargs"].get("n_devices") == 2
+    assert "n_devices" not in captured["kwargs"]
+    assert captured["kwargs"].get("device_map") == "balanced"
+    assert isinstance(captured["kwargs"].get("max_memory"), dict)
+    assert all(
+        isinstance(v, int) for v in captured["kwargs"]["max_memory"].values()
+    )
     assert "device" not in captured["kwargs"]
     assert wrapper.n_devices == 2
     assert wrapper.input_device == "cuda:0"
@@ -388,6 +438,8 @@ def _run_all() -> None:
         test(wrapper)
         print(f"passed: {test.__name__}")
 
+    test_multi_gpu_boot_kwargs_emits_integer_budgets()
+    print("passed: test_multi_gpu_boot_kwargs_emits_integer_budgets")
     test_boot_kwargs_pass_n_devices()
     print("passed: test_boot_kwargs_pass_n_devices")
     test_boot_kwargs_single_device_passes_device()
