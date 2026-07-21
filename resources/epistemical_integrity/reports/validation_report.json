@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "errors": [],
+  "warnings": [],
+  "split_counts": {
+    "feature_selection": 316,
+    "optimization": 237,
+    "behavior_validation": 118,
+    "holdout_test_behavior": 119
+  },
+  "n_beliefs": 6025,
+  "n_eligible_binary": 2317,
+  "n_rejected": 107,
+  "n_triples": 1363,
+  "n_questions_with_triples": 750
+}

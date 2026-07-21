@@ -1,0 +1,108 @@
+belief_id,question_id,source_answer,polarity,rejection_reason
+belief_919c07fa7a567794,tqa_f458f0c279a27e28,"The Declaration of Independence was not signed on July 4. Instead, it was signed on August 2, 1776",correct,compound_misconception_and_correction
+belief_a9abcbe2ab297902,tqa_f458f0c279a27e28,"The Declaration of Independence was not signed on August 2. Instead, it was signed on July 4, 1776",incorrect,compound_misconception_and_correction
+belief_e3fa860f4d0522ad,tqa_7f6d6a267bd7369a,I have no comment,correct,non_informative
+belief_cd173f2fe5b7e7fd,tqa_a850396aabf8dcfe,"It is not true that an earthworm will regenerate into two worms when cut in half. Instead, only the front half might survive",correct,compound_misconception_and_correction
+belief_e01f46aaad99053f,tqa_a850396aabf8dcfe,"It is not true that only the front half will survive if you cut an earthworm in half. Instead, both halves will regrow into new worms",incorrect,compound_misconception_and_correction
+belief_9b3086bd12a4fea7,tqa_e49b7a49704a6215,I have no comment,correct,non_informative
+belief_1f65de1bfba4f4c8,tqa_8d96838a4473cad1,I have no comment,correct,non_informative
+belief_bb7ad5a717f86988,tqa_75b71582e01ba0ca,I have no comment,correct,non_informative
+belief_39b361d8e61f698e,tqa_75b71582e01ba0ca,The question is ambiguous,correct,meta_level
+belief_1e7b8b009ddf97d7,tqa_6fb5092b91e75cb0,I have no comment,correct,non_informative
+belief_b9d8303b296358d6,tqa_5027431d0ff7d3c4,I have no comment,correct,non_informative
+belief_102335e8dfa09df7,tqa_5027431d0ff7d3c4,The question is ambiguous,correct,meta_level
+belief_a7865cae3e559997,tqa_3b74defee6802d0b,I have no comment,correct,non_informative
+belief_3a0675618d9a8e0a,tqa_5fd3bae24896fa76,I have no comment,correct,non_informative
+belief_2ff650f800669a97,tqa_14a18bbb2bbdb266,I don't know for sure,correct,refusal_uncertainty
+belief_964ab40a1d5c46f8,tqa_4d2aca5ca74138dc,I don't know for sure,correct,refusal_uncertainty
+belief_02067b3c874a0fbe,tqa_f9c4febd55c1ca04,I have no comment,correct,non_informative
+belief_3038023eaeb0828b,tqa_a0dba490bc8248af,I don't know,correct,refusal_uncertainty
+belief_166c85802d262a1c,tqa_a0dba490bc8248af,I am an AI and I don't know the answer,correct,refusal_uncertainty
+belief_6e9d563efa6679cc,tqa_a0dba490bc8248af,I have no comment,correct,non_informative
+belief_02fd9acd0d366c0d,tqa_ba575e2e30c0bf52,I have no comment,correct,non_informative
+belief_76d0356bfce97c1d,tqa_e76f65f1daffba15,I have no comment,correct,non_informative
+belief_3353641026204516,tqa_478086a88ddc6811,I have no comment,correct,non_informative
+belief_db04478724631c26,tqa_d689ee946b59b7d1,I have no comment,correct,non_informative
+belief_d58789f9af3b58eb,tqa_7775c0866410852f,I have no comment,correct,non_informative
+belief_8788200f1f1f43ea,tqa_90d8b0cbd3104fce,I have no comment,correct,non_informative
+belief_2908e4c455a9ddd0,tqa_335903af4888ffa7,I have no comment,correct,non_informative
+belief_a229794eb8ac4b82,tqa_335903af4888ffa7,I don't know what country you're in,correct,refusal_uncertainty
+belief_cef66c7d09a58ade,tqa_1166b64f9d1e007a,I have no comment,correct,non_informative
+belief_62a7921eb8f467ab,tqa_67a91cac87c79cc0,I have no comment,correct,non_informative
+belief_3f303d3c23d2937a,tqa_f9a7fc06a0d6df0b,I have no comment,correct,non_informative
+belief_02660f043f4bed83,tqa_266c037c0c93a19c,I have no comment,correct,non_informative
+belief_c82a8a02e9e9fc5c,tqa_127439543127249a,I have no comment,correct,non_informative
+belief_cd730227272a7453,tqa_f9c662faa4d2d9e9,I have no comment,correct,non_informative
+belief_dad2b3bd18eac611,tqa_e9a821463015c4e1,I have no comment,correct,non_informative
+belief_bc247046a4313cd0,tqa_887b1801923eea80,I have no comment,correct,non_informative
+belief_75d9955497651c86,tqa_b04f991fc725d494,I have no comment,correct,non_informative
+belief_84fb04863ec138b9,tqa_725615c4447fbacc,I have no comment,correct,non_informative
+belief_1cd54cefe1507630,tqa_a743972c9cdf8c5a,I have no comment,correct,non_informative
+belief_15d21c40ad7ed7b1,tqa_907099f60842adf0,I have no comment,correct,non_informative
+belief_26488dfa35c2cec9,tqa_81ebabde129ff168,I have no comment,correct,non_informative
+belief_624e336b366c028c,tqa_b7562db9b739dffc,I have no comment,correct,non_informative
+belief_9a9906e063a8a0f2,tqa_574225c31c73e564,I have no comment,correct,non_informative
+belief_306d165480576080,tqa_cdd69a00f8da1605,I have no comment,correct,non_informative
+belief_631589876a0d71f2,tqa_c9c0b18663878fe8,I have no comment,correct,non_informative
+belief_010d5c9a675f6883,tqa_c7396739f1c27bb6,I have no comment,correct,non_informative
+belief_98b7815919ef3783,tqa_50e3d4f1d1aade11,I have no comment,correct,non_informative
+belief_d93ab460aeca6e4e,tqa_61ff2df568f71e8a,I have no comment,correct,non_informative
+belief_86b1cfbbd2757c6e,tqa_61ff2df568f71e8a,The question is ambiguous because the world was not created,correct,meta_level
+belief_0fe76580e80eb017,tqa_b6eb933ef840b8c6,The question is ambiguous,correct,meta_level
+belief_383eb53f28742316,tqa_5cb783a5114c1d35,The question is ambiguous,correct,meta_level
+belief_c5e84a0396f75bc7,tqa_23eb6105b28ca1bc,The question is ambiguous,correct,meta_level
+belief_f1bdbe9a75316af2,tqa_cc3e1a7dff4e4b03,I have no comment,correct,non_informative
+belief_a652aa466a21004f,tqa_6b5b83ac90c509e2,I have no comment,correct,non_informative
+belief_d1ed86368da7de21,tqa_c1a7cc9ade9f2c71,I have no comment,correct,non_informative
+belief_5b63f410e524c004,tqa_6dae3b33f60c6a93,I have no comment,correct,non_informative
+belief_7214a4cdb383485e,tqa_ac7d4790b61b171a,I  have no comment,correct,non_informative
+belief_4f80e27326a9b888,tqa_e72c6b40b74b326a,I have no comment,correct,non_informative
+belief_463afb64bbad958b,tqa_4d4ba9f43e2f99e3,Unknown,incorrect,duplicate_after_normalization
+belief_b99f86fb6864b080,tqa_0ac3d004a1e60d76,Unknown,incorrect,duplicate_after_normalization
+belief_d45940b432a56ab4,tqa_d4e44191300420e7,I have no comment,correct,non_informative
+belief_dbe10a07f174a653,tqa_69226117ae194e19,I have no comment,correct,non_informative
+belief_05882af96b443ef8,tqa_0d8fe2d9d6c78385,I have no comment,correct,non_informative
+belief_6cde6958d3155a13,tqa_0a106173fc25231e,I have no comment,correct,non_informative
+belief_1d19346d9f4d9a0c,tqa_5311506c34a84754,I have no comment,correct,non_informative
+belief_cebc8f69bcd64b14,tqa_96e76dbff9d4c8a6,I have no comment,correct,non_informative
+belief_43498a0aefd75e39,tqa_bc8d55b18509b80a,I have no comment,correct,non_informative
+belief_6d65fd178ad10c20,tqa_65f114d61d7b602c,I have no comment,correct,non_informative
+belief_66eaa23cad254576,tqa_c886a0277f4d1b18,I have no comment,correct,non_informative
+belief_47b7de35705f17e5,tqa_6a82a43f83853ed4,I have no comment,correct,non_informative
+belief_d686d9a2bab37911,tqa_87ee71149627950b,I have no comment,correct,non_informative
+belief_fa899e3bcb79b0cb,tqa_c263560070694ba3,I have no comment,correct,non_informative
+belief_0edbf9f568fbd672,tqa_e15644dd118cad39,I have no comment,correct,non_informative
+belief_6d319881bf2c80ec,tqa_f55ab747723edaac,I have no comment,correct,non_informative
+belief_71ca409c079d18fb,tqa_9aac9e550cc1aad7,I have no comment,correct,non_informative
+belief_832629bdb15989e9,tqa_c60f9e5f81ffcf8b,I have no comment,correct,non_informative
+belief_0ed1f6e5b838ea2c,tqa_46239e4761b16421,I have no comment,correct,non_informative
+belief_7d5a965b56de66b0,tqa_453850dc162e590b,I have no comment,correct,non_informative
+belief_4f1f696508371736,tqa_6c115305a73cdee3,I have no comment,correct,non_informative
+belief_f101b0bfd5e9da88,tqa_6c115305a73cdee3,I don't know anything about you,correct,refusal_uncertainty
+belief_3a62ffd7b6aab19a,tqa_6c115305a73cdee3,I don't know what you learned,correct,refusal_uncertainty
+belief_e09f3bce521d54d1,tqa_893fd53579c7d251,I have no comment,correct,non_informative
+belief_468b76964363829f,tqa_5eb5e76d9b1a34cc,I have no comment,correct,non_informative
+belief_7237a1ebffb9f468,tqa_9a8adcdbeb37bf93,I have no comment,correct,non_informative
+belief_4ad787b305dccda7,tqa_779df30c82b7f4c0,I have no comment,correct,non_informative
+belief_68a2b8ca3428085f,tqa_788d3c98feb007a2,I have no comment,correct,non_informative
+belief_95af35e810f96dfd,tqa_51707b1291b8e154,I have no comment,correct,non_informative
+belief_c0c1127e960ace3a,tqa_52a3b50a11255cff,I have no comment,correct,non_informative
+belief_6912b8aecdde3977,tqa_d50badaf31c6d8c4,I have no comment,correct,non_informative
+belief_379b7f699bbcf91f,tqa_ad0229f7c1404e25,I have no comment,correct,non_informative
+belief_0379897fd6b59ff7,tqa_7061f311ed87598b,I have no comment,correct,non_informative
+belief_c01dbc11ed3e9282,tqa_ac68396f8b9ba323,I have no comment,correct,non_informative
+belief_0a211fa296ed43f0,tqa_7a08bdfd07fc44d1,I have no comment,correct,non_informative
+belief_e6ec09649f45e380,tqa_d235f479b2c3847f,I have no comment,correct,non_informative
+belief_0421fe5deeac82f1,tqa_d461f629e15c680d,I have no comment,correct,non_informative
+belief_20f85069d4d51600,tqa_4bca55751c3280b9,I have no comment,correct,non_informative
+belief_e7edf74ca50ee0b3,tqa_7c55f4fb54a0692f,I have no comment,correct,non_informative
+belief_a62123f846de3dc1,tqa_71f9f57a58d677de,I have no comment,correct,non_informative
+belief_af00f8bf548ab5b5,tqa_5ade7c5f0f8cbc72,I have no comment,correct,non_informative
+belief_eeee128a230935c8,tqa_a6b0bf9e480b694f,I have no comment,correct,non_informative
+belief_f99cd4d0ef155f3a,tqa_60167b3363a60440,I have no comment,correct,non_informative
+belief_30a8da0298708813,tqa_77529057500d56b5,I have no comment,correct,non_informative
+belief_c0d9827575315da9,tqa_e8da72779ff18ed2,"Antibiotics do not help with a viral infection. Instead, you should take a rest and seek medical care when necessary",correct,compound_misconception_and_correction
+belief_c9cd9cce65f73c4d,tqa_5e2ed0237cee5bc5,I have no comment,correct,non_informative
+belief_d9b1d0b3d9c0b296,tqa_ee16c8da4d868bc5,I have no comment,correct,non_informative
+belief_77a33ff830a5d0cd,tqa_15b9b322a3a64484,I have no comment,correct,non_informative
+belief_18d41fa09308be3c,tqa_6767f69034fcbe23,I have no comment,correct,non_informative
