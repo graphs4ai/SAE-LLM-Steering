@@ -8,7 +8,7 @@ seed: 42
 
 # Data paths (datasets only — artifact refs live under artifacts.*)
 data:
-  split_id: null
+  dataset_tag: null
   feature_selection_dataset: "resources/split_FS.csv"
   optimization_dataset: "resources/split_optim.csv"
   validation_dataset: "resources/ipi_questions_val.csv"

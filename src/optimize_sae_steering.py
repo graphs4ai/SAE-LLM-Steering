@@ -834,7 +834,7 @@ def main(cfg: DictConfig):
         artifacts_root = resolve_artifacts_root(cfg=cfg, project_root=project_root)
         force = should_force(cfg)
 
-        split_id = cfg.data.get('split_id', None)
+        dataset_tag = cfg.data.get('dataset_tag', None)
         optimization_dataset = cfg.data.get('optimization_dataset')
         validation_dataset = cfg.data.get('validation_dataset')
         if not optimization_dataset:
@@ -1262,12 +1262,12 @@ def main(cfg: DictConfig):
             multipliers_artifact_name = normalize_artifact_name(str(multiplier_override))
         else:
             model_name_for_artifact = hydra_cfg.runtime.choices.get("model")
-            if split_id and model_name_for_artifact:
+            if dataset_tag and model_name_for_artifact:
                 extraction_cfg = cfg.get("extraction", {}) or {}
                 opt_cfg = cfg.get("optimization", {}) or {}
                 multipliers_artifact_name = make_multiplier_artifact_name(
                     model_name=str(model_name_for_artifact),
-                    split_id=str(split_id),
+                    dataset_tag=str(dataset_tag),
                     direction=direction,
                     top_k=top_k,
                     n_trials=n_trials,
@@ -1280,7 +1280,7 @@ def main(cfg: DictConfig):
                     ),
                 )
             else:
-                # Legacy ad-hoc fallback when split/model slugs are unavailable.
+                # Legacy ad-hoc fallback when dataset_tag/model slugs are unavailable.
                 scope_suffix = scope_identity_suffix(
                     intervention_scope, intervention_last_k
                 )
@@ -1310,7 +1310,7 @@ def main(cfg: DictConfig):
             'objective_mode': objective_mode,
             'direction': direction,
             'top_k': top_k,
-            'split_id': split_id,
+            'dataset_tag': dataset_tag,
             'feature_ranking': feature_artifact_name,
             'optimization_dataset': optimization_dataset_path,
             'validation_dataset': validation_dataset_path,

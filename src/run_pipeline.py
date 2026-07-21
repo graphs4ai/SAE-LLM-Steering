@@ -398,7 +398,7 @@ def _resolve_runs_subdir(experiment: DictConfig, pipeline_cfg: Any) -> str:
 
 def _baseline_reuse_key(
     model_cfg_name: str,
-    split_id: str,
+    dataset_tag: str,
     seed: int,
     cfg: DictConfig,
 ) -> tuple[Any, ...]:
@@ -416,7 +416,7 @@ def _baseline_reuse_key(
         raise ValueError("data.validation_dataset must be set for pipeline IPI planning.")
     return (
         model_cfg_name,
-        split_id,
+        dataset_tag,
         str(validation_dataset),
         str(ipi_cfg.get("prompt_template_version", "default")),
         str(ipi_cfg.get("parser_version", "default")),
@@ -431,7 +431,7 @@ def _plan_matrix_for_seed(
     cfg: DictConfig,
     experiment: DictConfig,
     resolved: ResolvedSeeds,
-    split_id: str,
+    dataset_tag: str,
     scopes: list[str],
     intervention_last_k: int,
     ranking_top_n: int,
@@ -476,7 +476,7 @@ def _plan_matrix_for_seed(
                             for scope in scopes:
                                 run_id = make_run_id(
                                     model_name=model_cfg_name,
-                                    split_id=split_id,
+                                    dataset_tag=dataset_tag,
                                     direction=direction,
                                     top_k=top_k,
                                     n_trials=n_trials,
@@ -495,7 +495,7 @@ def _plan_matrix_for_seed(
                                 )
                                 baseline_key = _baseline_reuse_key(
                                     model_cfg_name=model_cfg_name,
-                                    split_id=split_id,
+                                    dataset_tag=dataset_tag,
                                     seed=baseline_seed,
                                     cfg=cfg,
                                 )
@@ -510,19 +510,19 @@ def _plan_matrix_for_seed(
                                     artifact_names = {
                                         "activations": make_activation_artifact_name(
                                             model_name=model_cfg_name,
-                                            split_id=split_id,
+                                            dataset_tag=dataset_tag,
                                             layers=layers,
                                             sae_width=sae_width,
                                         ),
                                         "feature_ranking": make_feature_ranking_artifact_name(
                                             model_name=model_cfg_name,
-                                            split_id=split_id,
+                                            dataset_tag=dataset_tag,
                                             ranking_top_n=ranking_top_n,
                                             sae_width=sae_width,
                                         ),
                                         "multipliers": make_multiplier_artifact_name(
                                             model_name=model_cfg_name,
-                                            split_id=split_id,
+                                            dataset_tag=dataset_tag,
                                             direction=direction,
                                             top_k=top_k,
                                             n_trials=n_trials,
@@ -534,13 +534,13 @@ def _plan_matrix_for_seed(
                                         ),
                                         "ipi_baseline": make_ipi_artifact_name(
                                             model_name=model_cfg_name,
-                                            split_id=split_id,
+                                            dataset_tag=dataset_tag,
                                             condition="baseline",
                                             seed=baseline_seed,
                                         ),
                                         "ipi_intervened": make_ipi_artifact_name(
                                             model_name=model_cfg_name,
-                                            split_id=split_id,
+                                            dataset_tag=dataset_tag,
                                             condition="intervened",
                                             seed=optimization_seed,
                                             direction=direction,
@@ -604,7 +604,7 @@ def _plan_matrix_for_seed(
                                         "run_id": run_id,
                                         "status": "planned",
                                         "model_name": model_cfg_name,
-                                        "split_id": split_id,
+                                        "dataset_tag": dataset_tag,
                                         "direction": direction,
                                         "top_k": top_k,
                                         "n_trials": int(n_trials),
@@ -680,7 +680,7 @@ def _plan_matrix_for_seed(
                                         "run_id": run_id,
                                         "status": "failed",
                                         "model_name": model_cfg_name,
-                                        "split_id": split_id,
+                                        "dataset_tag": dataset_tag,
                                         "direction": direction,
                                         "top_k": top_k,
                                         "n_trials": int(n_trials),
@@ -709,7 +709,7 @@ def main(cfg: DictConfig) -> None:
         )
 
     experiment = cfg.experiment
-    split_id = str(experiment.split_id)
+    dataset_tag = str(experiment.dataset_tag)
     # Optional multi-seed axis. `[None]` means "no sweep" -> a single run using
     # the standard (non-overridden) seed resolution, identical to legacy behavior.
     seed_values = seed_sweep_values(cfg)
@@ -799,7 +799,7 @@ def main(cfg: DictConfig) -> None:
             cfg=cfg,
             experiment=experiment,
             resolved=resolved,
-            split_id=split_id,
+            dataset_tag=dataset_tag,
             scopes=scopes,
             intervention_last_k=intervention_last_k,
             ranking_top_n=ranking_top_n,

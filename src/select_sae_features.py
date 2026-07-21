@@ -269,14 +269,14 @@ def main(cfg: DictConfig) -> None:
     activations_artifact_name = normalize_artifact_name(str(activations_artifact_name))
 
     model_name = cfg.model.name.split("/")[-1]
-    split_id = cfg.data.get("split_id", None)
+    dataset_tag = cfg.data.get("dataset_tag", None)
     feature_ranking_override = artifacts_cfg.get("feature_ranking", None)
     if feature_ranking_override:
         feature_artifact_name_out = normalize_artifact_name(str(feature_ranking_override))
     else:
         feature_artifact_name_out = (
             f"feature-ranking-{model_name}-"
-            f"{split_id or 'nosplit'}-top{ranking_top_n}"
+            f"{dataset_tag or 'untagged'}-top{ranking_top_n}"
         )
 
     if (
@@ -382,7 +382,7 @@ def main(cfg: DictConfig) -> None:
 
     ranking_payload = {
         "model_name": model_name,
-        "split_id": split_id,
+        "dataset_tag": dataset_tag,
         "feature_selection_dataset": feature_selection_dataset,
         "activations_artifact_name": activations_artifact_name,
         "method": method,
@@ -410,7 +410,7 @@ def main(cfg: DictConfig) -> None:
             "n_candidate_features": len(feature_columns),
             "method": method,
             "model_name": model_name,
-            "split_id": split_id,
+            "dataset_tag": dataset_tag,
             "feature_selection_dataset": feature_selection_dataset,
             "activations_artifact_name": activations_artifact_name,
             "ranking_top_n": ranking_top_n_effective,

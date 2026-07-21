@@ -14,7 +14,7 @@ _DEFAULT_PIPELINE_DIR = "runs/pipeline"
 SUMMARY_COLUMNS = [
     "run_id",
     "model_name",
-    "split_id",
+    "dataset_tag",
     "direction",
     "top_k",
     "n_trials",
@@ -77,7 +77,8 @@ def _flatten_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": manifest.get("run_id"),
         "model_name": manifest.get("model_name"),
-        "split_id": manifest.get("split_id"),
+        # Prefer dataset_tag; fall back to legacy split_id for older manifests.
+        "dataset_tag": manifest.get("dataset_tag") or manifest.get("split_id"),
         "direction": manifest.get("direction"),
         "top_k": manifest.get("top_k"),
         "n_trials": manifest.get("n_trials"),

@@ -1,5 +1,5 @@
 name: gemma_scope_27b_k60
-split_id: three_way_plus_holdout_v1
+dataset_tag: three_way_plus_holdout_v1
 # Seeds to run (one full matrix per seed). One-element list = single run.
 seeds: [1, 10, 20, 30, 42]
 # Manifest root: runs/<runs_subdir>/

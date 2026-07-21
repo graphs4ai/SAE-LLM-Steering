@@ -74,7 +74,7 @@ def scope_identity_suffix(scope: str | None, last_k: int | None) -> str:
 
 def make_run_id(
     model_name: str,
-    split_id: str,
+    dataset_tag: str,
     direction: str | None,
     top_k: int | None,
     n_trials: int | None,
@@ -85,7 +85,7 @@ def make_run_id(
     sae_width: str | None = None,
     bounds_multiplier: float | None = None,
 ) -> str:
-    parts: list[str] = [_normalize(model_name), _normalize(split_id)]
+    parts: list[str] = [_normalize(model_name), _normalize(dataset_tag)]
     if condition:
         parts.append(_normalize(condition))
     if direction:
@@ -105,12 +105,12 @@ def make_run_id(
 
 def make_activation_artifact_name(
     model_name: str,
-    split_id: str,
+    dataset_tag: str,
     layers: str,
     sae_width: str | None = None,
 ) -> str:
     base = (
-        f"activations-{_normalize(model_name)}-{_normalize(split_id)}-"
+        f"activations-{_normalize(model_name)}-{_normalize(dataset_tag)}-"
         f"{_normalize(layers)}"
     )
     return f"{base}{_sae_bounds_suffix(sae_width=sae_width)}"
@@ -118,12 +118,12 @@ def make_activation_artifact_name(
 
 def make_feature_ranking_artifact_name(
     model_name: str,
-    split_id: str,
+    dataset_tag: str,
     ranking_top_n: int,
     sae_width: str | None = None,
 ) -> str:
     base = (
-        f"feature-ranking-{_normalize(model_name)}-{_normalize(split_id)}-"
+        f"feature-ranking-{_normalize(model_name)}-{_normalize(dataset_tag)}-"
         f"top{int(ranking_top_n)}"
     )
     return f"{base}{_sae_bounds_suffix(sae_width=sae_width)}"
@@ -131,7 +131,7 @@ def make_feature_ranking_artifact_name(
 
 def make_multiplier_artifact_name(
     model_name: str,
-    split_id: str,
+    dataset_tag: str,
     direction: str,
     top_k: int,
     n_trials: int,
@@ -142,7 +142,7 @@ def make_multiplier_artifact_name(
     bounds_multiplier: float | None = None,
 ) -> str:
     return (
-        f"multipliers-{_normalize(model_name)}-{_normalize(split_id)}-"
+        f"multipliers-{_normalize(model_name)}-{_normalize(dataset_tag)}-"
         f"{_normalize(direction)}-k{int(top_k)}-trials{int(n_trials)}-seed{int(seed)}"
         f"{_sae_bounds_suffix(sae_width=sae_width, bounds_multiplier=bounds_multiplier)}"
         f"{scope_identity_suffix(scope, last_k)}"
@@ -151,7 +151,7 @@ def make_multiplier_artifact_name(
 
 def make_ipi_artifact_name(
     model_name: str,
-    split_id: str,
+    dataset_tag: str,
     condition: str,
     seed: int,
     direction: str | None = None,
@@ -164,14 +164,14 @@ def make_ipi_artifact_name(
 ) -> str:
     condition_norm = _normalize(condition)
     if condition_norm == "baseline":
-        return f"ipi-baseline-{_normalize(model_name)}-{_normalize(split_id)}-seed{int(seed)}"
+        return f"ipi-baseline-{_normalize(model_name)}-{_normalize(dataset_tag)}-seed{int(seed)}"
     if condition_norm == "intervened":
         if direction is None or top_k is None or n_trials is None:
             raise ValueError(
                 "Intervened IPI artifact name requires direction, top_k, and n_trials."
             )
         return (
-            f"ipi-intervened-{_normalize(model_name)}-{_normalize(split_id)}-"
+            f"ipi-intervened-{_normalize(model_name)}-{_normalize(dataset_tag)}-"
             f"{_normalize(direction)}-k{int(top_k)}-trials{int(n_trials)}-seed{int(seed)}"
             f"{_sae_bounds_suffix(sae_width=sae_width, bounds_multiplier=bounds_multiplier)}"
             f"{scope_identity_suffix(scope, last_k)}"
@@ -185,7 +185,7 @@ if __name__ == "__main__":
     demo = {
         "run_id": make_run_id(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             direction="minimize",
             top_k=80,
             n_trials=3000,
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         ),
         "run_id_default_scope": make_run_id(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             direction="minimize",
             top_k=16,
             n_trials=1000,
@@ -207,7 +207,7 @@ if __name__ == "__main__":
         ),
         "run_id_with_scope": make_run_id(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             direction="minimize",
             top_k=16,
             n_trials=1000,
@@ -219,22 +219,22 @@ if __name__ == "__main__":
         ),
         "activations": make_activation_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             layers=format_layers_slug("all"),
         ),
         "activations_layers_list": make_activation_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             layers=format_layers_slug([9, 17, 22, 29]),
         ),
         "feature_ranking": make_feature_ranking_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             ranking_top_n=256,
         ),
         "multipliers": make_multiplier_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             direction="minimize",
             top_k=80,
             n_trials=3000,
@@ -242,7 +242,7 @@ if __name__ == "__main__":
         ),
         "multipliers_with_scope": make_multiplier_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             direction="minimize",
             top_k=16,
             n_trials=1000,
@@ -252,13 +252,13 @@ if __name__ == "__main__":
         ),
         "ipi_baseline": make_ipi_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             condition="baseline",
             seed=42,
         ),
         "ipi_intervened": make_ipi_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             condition="intervened",
             direction="minimize",
             top_k=80,
@@ -267,7 +267,7 @@ if __name__ == "__main__":
         ),
         "ipi_intervened_with_scope": make_ipi_artifact_name(
             model_name="gemma-3-4b",
-            split_id="three_way_split_v1",
+            dataset_tag="three_way_split_v1",
             condition="intervened",
             direction="minimize",
             top_k=16,
