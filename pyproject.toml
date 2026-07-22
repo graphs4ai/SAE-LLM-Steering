@@ -16,6 +16,7 @@ dependencies = [
     "optuna",
     "pandas",
     "pyarrow",
+    "pytest>=6.25",
     "sae-lens",
     "scikit-learn",
     "scipy",
